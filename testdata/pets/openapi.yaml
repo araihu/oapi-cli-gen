@@ -1,0 +1,70 @@
+openapi: 3.0.3
+info:
+  title: Pets acceptance API
+  version: 1.0.0
+servers:
+  - url: https://example.invalid/base
+security:
+  - bearerAuth: []
+tags:
+  - name: Pets
+paths:
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema: {type: integer, format: int64, minimum: 1}
+      - name: limit
+        in: query
+        schema: {type: integer, minimum: 1, maximum: 5, default: 2}
+    get:
+      operationId: getPet
+      x-cli-name: get
+      tags: [Pets]
+      summary: Read a pet
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 10, default: 3}
+        - name: tag
+          in: query
+          style: form
+          explode: true
+          schema: {type: array, items: {type: string}}
+        - name: If-Match
+          in: header
+          schema: {type: string}
+        - name: server
+          in: query
+          schema: {type: string}
+        - name: date
+          in: query
+          schema: {type: string, format: date}
+      responses:
+        '200':
+          description: Pet
+          content:
+            application/json:
+              schema: {$ref: ./schemas/pet.yaml}
+  /pets:
+    post:
+      operationId: createPet
+      tags: [Pets]
+      x-cli-name: create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: ./schemas/pet.yaml}
+      responses:
+        '201': {description: Created}
+  /health:
+    get:
+      operationId: health
+      security: []
+      responses:
+        '200': {description: Healthy}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}

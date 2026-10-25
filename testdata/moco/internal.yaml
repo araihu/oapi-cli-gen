@@ -1,0 +1,1086 @@
+openapi: 3.0.3
+info:
+  title: Mocó Internal Operations API
+  version: 0.9.0
+  description: |
+    Process probes, deployment-scoped authorization administration, and a
+    restricted request audit ledger for security observability. The audit
+    operation is not a reconciliation/change feed; controllers and operators
+    use the public watch endpoint and relist contract for convergence. A
+    bounded local retention operation removes events before an operator-supplied
+    cutoff without changing public resource history.
+    The encryption operations report the shared root-key state and perform
+    bounded online rewraps of vault data keys under the configured active
+    root-key era; key material is supplied only by deployment configuration and
+    is never accepted or returned by this API.
+    Administrative operations are intended for a restricted deployment origin;
+    they never expose bearer token digests or request payloads.
+  contact:
+    name: AraiHu
+    url: https://github.com/araihu/moco
+servers:
+  - url: /
+    description: Direct deployment origin, normally restricted by network policy.
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+    description: Process liveness and traffic readiness probes.
+  - name: Authorization
+    description: Restricted replacement of the persisted authorization snapshot.
+  - name: Audit
+    description: Restricted request metadata ledger for security observability; not a reconciliation feed.
+  - name: Encryption
+    description: Restricted root-key status and bounded rewrap maintenance; never accepts or returns key material.
+paths:
+  /livez:
+    get:
+      operationId: getLiveness
+      summary: Check process liveness
+      description: Returns 200 while the server process can handle HTTP requests.
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Process is live.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/health-status'
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Check traffic readiness
+      description: |
+        Returns 200 when the instance can serve product traffic and 503 otherwise.
+        The body deliberately omits dependency and configuration details.
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Instance is ready for product traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/health-status'
+        '503':
+          description: Instance is not ready for product traffic.
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/retry-after'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/unavailable-status'
+  /internal/v1/authorization:
+    parameters:
+      - $ref: '#/components/parameters/request-id'
+    get:
+      operationId: getAuthorizationSnapshot
+      summary: Read the persisted authorization snapshot
+      description: Returns the complete role-binding and policy snapshot without token digests. The ETag is the authoritative snapshot revision. A policy's optional secretPathPrefix narrows the decoded logical path or prefix query value for a secret item, metadata, or collection route and is a literal prefix match.
+      tags: [Authorization]
+      responses:
+        '200':
+          description: Persisted authorization snapshot.
+          headers:
+            ETag:
+              $ref: '#/components/headers/etag'
+            X-Request-ID:
+              $ref: '#/components/headers/request-id'
+          content:
+            application/json:
+              example:
+                initialized: true
+                revision: 3
+                roleBindings:
+                  - principal: controller
+                    role: secret-reader
+                    domain: tenant-a
+                policies:
+                  - subject: secret-reader
+                    domain: tenant-a
+                    path: /api/v1/tenants/{tenantId}/vaults/{vaultId}/secret
+                    method: GET
+              schema:
+                $ref: '#/components/schemas/authorization-snapshot'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '500':
+          $ref: '#/components/responses/internal-error'
+        '503':
+          $ref: '#/components/responses/service-unavailable'
+    put:
+      operationId: replaceAuthorizationSnapshot
+      summary: Replace the persisted authorization snapshot
+      description: Atomically replaces all role bindings and policies when If-Match identifies the revision observed by the writer. A committed change signals local reloaders and is discovered by shared-store polling in other processes. Set secretPathPrefix only on a policy for a canonical secret operation route; policies without it remain vault-scoped.
+      tags: [Authorization]
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          description: Strong ETag returned by the latest GET or PUT response. Use `*` to apply against the revision observed immediately before this request.
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        description: Complete replacement snapshot; empty arrays mean default-deny.
+        content:
+          application/json:
+            example:
+              roleBindings:
+                - principal: controller
+                  role: secret-reader
+                  domain: tenant-a
+              policies:
+                - subject: secret-reader
+                  domain: tenant-a
+                  path: /api/v1/tenants/{tenantId}/vaults/{vaultId}/secret
+                  method: GET
+            schema:
+              $ref: '#/components/schemas/authorization-snapshot-input'
+      responses:
+        '200':
+          description: Newly persisted authorization snapshot.
+          headers:
+            ETag:
+              $ref: '#/components/headers/etag'
+            X-Request-ID:
+              $ref: '#/components/headers/request-id'
+          content:
+            application/json:
+              example:
+                initialized: true
+                revision: 4
+                roleBindings:
+                  - principal: controller
+                    role: secret-reader
+                    domain: tenant-a
+                policies:
+                  - subject: secret-reader
+                    domain: tenant-a
+                    path: /api/v1/tenants/{tenantId}/vaults/{vaultId}/secret
+                    method: GET
+              schema:
+                $ref: '#/components/schemas/authorization-snapshot'
+        '400':
+          $ref: '#/components/responses/bad-request'
+        '412':
+          $ref: '#/components/responses/precondition-failed'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '500':
+          $ref: '#/components/responses/internal-error'
+        '503':
+          $ref: '#/components/responses/service-unavailable'
+  /internal/v1/audit:
+    parameters:
+      - $ref: '#/components/parameters/request-id'
+    get:
+      operationId: listAuditEvents
+      summary: List request audit events
+      description: Returns request metadata in ascending durable sequence order for security observability. Successful mutations and their event commit in one SQLite transaction before the success response; failed audit or commit rolls back the mutation. Startup metadata initialization uses a synthetic STARTUP event with route /internal/startup and principal system:startup. Read-only and rejected attempts are recorded independently after their response and may be missing on audit failure. This is not a reconciliation or change-feed operation; controllers and operators must use the public watch endpoint and relist contract for convergence. Query strings, request bodies, bearer credentials, and plaintext logical secret paths are never returned; secret paths are represented only by keyed HMAC-SHA-256 digests. Reads from this endpoint are not themselves recorded, so a tailing client cannot create self-events. The endpoint is internal and requires an explicit authorization policy for its exact path.
+      tags: [Audit]
+      parameters:
+        - $ref: '#/components/parameters/audit-after-sequence'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Ordered audit event page.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/request-id'
+          content:
+            application/json:
+              example:
+                items: []
+                hasMore: false
+                nextAfterSequence: null
+              schema:
+                $ref: '#/components/schemas/audit-event-list'
+        '400':
+          $ref: '#/components/responses/bad-request'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '500':
+          $ref: '#/components/responses/internal-error'
+        '503':
+          $ref: '#/components/responses/service-unavailable'
+  /internal/v1/audit/retention:
+    parameters:
+      - $ref: '#/components/parameters/request-id'
+    post:
+      operationId: purgeAuditEvents
+      summary: Purge one bounded audit-retention page
+      description: Deletes at most 200 audit events strictly older than the required cutoff; destructive requests require a cutoff at least one hour old. This is local deployment maintenance, not a public resource mutation. Set dryRun=true to preview the current matching count without deleting anything, including with a more recent past cutoff; a dry-run result is informational, not a convergence loop. For a delete, repeat the same cutoff until complete is true and remaining is zero; the count is not a snapshot and newly inserted events can change it. Sequence numbers remain monotonic, the public resource-watch revision is unchanged, and event contents, credentials, plaintext secret paths, and key material are never accepted or returned. The endpoint requires an explicit exact-path POST policy and should be restricted to a deployment origin.
+      tags: [Audit]
+      parameters:
+        - $ref: '#/components/parameters/audit-before'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/audit-dry-run'
+      responses:
+        '200':
+          description: Bounded retention result.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/request-id'
+          content:
+            application/json:
+              example:
+                before: '2026-08-01T00:00:00Z'
+                deleted: 50
+                remaining: 12
+                hasMore: true
+                complete: false
+                dryRun: false
+              schema:
+                $ref: '#/components/schemas/audit-retention-result'
+        '400':
+          $ref: '#/components/responses/bad-request'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '500':
+          $ref: '#/components/responses/internal-error'
+        '503':
+          $ref: '#/components/responses/service-unavailable'
+  /internal/v1/encryption/rotation:
+    parameters:
+      - $ref: '#/components/parameters/request-id'
+    post:
+      operationId: rotateEncryptionKeys
+      summary: Rewrap one bounded page of vault data keys
+      description: Rewraps persisted vault data keys whose root key ID is not the configured active era. The active and previous root keys are loaded from deployment configuration; this operation never accepts, returns, or logs key material. Repeating a page is safe. Use both returned keyset checkpoints to continue when hasMore is true, then run a fresh sweep until complete is true and remainingOldKeys is zero. The server persists an encryption-key epoch and rejects stale processes; the expected active ID and epoch are revalidated atomically in each key replacement, so all writers must start with the current epoch before maintenance. Rotation changes only wrapped-key bytes, not secret ciphertext, resource versions, or API representations, and may be run concurrently by workers in the same epoch.
+      tags: [Encryption]
+      parameters:
+        - $ref: '#/components/parameters/encryption-after-tenant-id'
+        - $ref: '#/components/parameters/encryption-after-vault-id'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Bounded rotation result.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/request-id'
+          content:
+            application/json:
+              example:
+                activeRootKeyId: root-v2
+                activeRootKeyEpoch: 2
+                scanned: 50
+                rewrapped: 47
+                skipped: 3
+                hasMore: true
+                complete: false
+                nextAfterTenantId: 11111111-1111-4111-8111-111111111111
+                nextAfterVaultId: 22222222-2222-4222-8222-222222222222
+                remainingOldKeys: 3
+              schema:
+                $ref: '#/components/schemas/encryption-rotation-result'
+        '400':
+          $ref: '#/components/responses/bad-request'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '409':
+          $ref: '#/components/responses/conflict'
+        '500':
+          $ref: '#/components/responses/internal-error'
+        '503':
+          $ref: '#/components/responses/service-unavailable'
+  /internal/v1/encryption/status:
+    get:
+      operationId: getEncryptionStatus
+      summary: Read root-key rotation status
+      description: Reads the current shared root-key era, deployment epoch, and count of vault keys still using an older era. The result is a point-in-time diagnostic, not a lock or a snapshot; it never accepts or returns key material, plaintext, ciphertext, or secret paths. Use it to coordinate bounded POST /internal/v1/encryption/rotation pages and remove an old deployment key only after a fresh sweep reports complete=true and remainingOldKeys=0. A concurrent writer or rotation worker can change the result immediately.
+      tags: [Encryption]
+      responses:
+        '200':
+          description: Current shared rotation status.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/request-id'
+          content:
+            application/json:
+              example:
+                activeRootKeyId: root-v2
+                activeRootKeyEpoch: 2
+                remainingOldKeys: 3
+                complete: false
+              schema:
+                $ref: '#/components/schemas/encryption-rotation-status'
+        '401':
+          $ref: '#/components/responses/unauthorized'
+        '403':
+          $ref: '#/components/responses/forbidden'
+        '409':
+          $ref: '#/components/responses/conflict'
+        '500':
+          $ref: '#/components/responses/internal-error'
+        '503':
+          $ref: '#/components/responses/service-unavailable'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Deployment-issued bearer credential for restricted operations.
+  schemas:
+    health-status:
+      title: HealthStatus
+      type: object
+      description: Minimal probe result with no deployment details.
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+          example: ok
+    unavailable-status:
+      title: UnavailableStatus
+      type: object
+      description: Minimal readiness failure with no dependency details.
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - unavailable
+          example: unavailable
+    authorization-snapshot:
+      title: AuthorizationSnapshot
+      type: object
+      description: Persisted authorization state; token digests are intentionally omitted.
+      additionalProperties: false
+      required:
+        - initialized
+        - revision
+        - roleBindings
+        - policies
+      properties:
+        initialized:
+          type: boolean
+          readOnly: true
+          example: true
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+          readOnly: true
+          description: Monotonic snapshot revision used by ETag and optimistic concurrency.
+          example: 3
+        roleBindings:
+          type: array
+          maxItems: 10000
+          example:
+            - principal: controller
+              role: secret-reader
+              domain: tenant-a
+          items:
+            $ref: '#/components/schemas/authorization-role-binding'
+        policies:
+          type: array
+          maxItems: 10000
+          example:
+            - subject: secret-reader
+              domain: tenant-a
+              path: /api/v1/tenants/{tenantId}/vaults/{vaultId}/secret
+              method: GET
+          items:
+            $ref: '#/components/schemas/authorization-policy'
+    authorization-snapshot-input:
+      title: AuthorizationSnapshotInput
+      type: object
+      description: Complete replacement snapshot; empty arrays intentionally mean default-deny.
+      additionalProperties: false
+      required:
+        - roleBindings
+        - policies
+      properties:
+        roleBindings:
+          type: array
+          maxItems: 10000
+          example:
+            - principal: controller
+              role: secret-reader
+              domain: tenant-a
+          items:
+            $ref: '#/components/schemas/authorization-role-binding'
+        policies:
+          type: array
+          maxItems: 10000
+          example:
+            - subject: secret-reader
+              domain: tenant-a
+              path: /api/v1/tenants/{tenantId}/vaults/{vaultId}/secret
+              method: GET
+          items:
+            $ref: '#/components/schemas/authorization-policy'
+    authorization-role-binding:
+      title: AuthorizationRoleBinding
+      type: object
+      description: Principal-to-role binding scoped to one authorization domain.
+      additionalProperties: false
+      required:
+        - principal
+        - role
+        - domain
+      properties:
+        principal:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: controller
+        role:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: secret-reader
+        domain:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: 11111111-1111-4111-8111-111111111111
+    authorization-policy:
+      title: AuthorizationPolicy
+      type: object
+      description: Allow policy for a role or principal, domain, path pattern, and HTTP method. Secret operation policies may additionally narrow access to a literal logical secret path prefix.
+      additionalProperties: false
+      required:
+        - subject
+        - domain
+        - path
+        - method
+      properties:
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: secret-reader
+        domain:
+          type: string
+          minLength: 1
+          maxLength: 128
+          example: 11111111-1111-4111-8111-111111111111
+        path:
+          type: string
+          minLength: 7
+          maxLength: 512
+          example: /api/v1/tenants/{tenantId}/vaults/{vaultId}/secret
+        method:
+          type: string
+          minLength: 1
+          maxLength: 16
+          example: GET
+        secretPathPrefix:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Literal logical secret path prefix. Only valid when path is the secret item, secret metadata, or secret collection route; the decoded path/prefix query value must begin with this prefix. An empty collection prefix is not authorized for a path-scoped policy. The reserved value '*' preserves legacy vault-wide behavior.
+          example: prod/database/
+    problem:
+      title: Problem
+      type: object
+      description: Problem Details response compatible with RFC 9457.
+      additionalProperties: false
+      required:
+        - type
+        - title
+        - status
+        - code
+        - requestId
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: Stable documentation URI for this problem type.
+          example: https://moco.araihu.com/problems/not-found
+        title:
+          type: string
+          minLength: 1
+          example: Not Found
+        status:
+          type: integer
+          format: int32
+          minimum: 400
+          maximum: 599
+          example: 404
+        code:
+          type: string
+          minLength: 1
+          description: |
+            Stable machine-readable error code. Implementations currently use
+            unauthorized, forbidden, invalid_request, invalid_json,
+            invalid_content_type, invalid_request_id, validation_failed,
+            invalid_if_match, invalid_if_none_match, invalid_cursor, cursor_expired,
+            invalid_resource_version, invalid_watch_timeout, resource_version_ahead,
+            resource_not_found,
+            resource_conflict, resource_has_children, idempotency_key_conflict,
+            etag_mismatch, secret_too_large, invalid_rotation_checkpoint,
+            invalid_limit, encryption_key_epoch_conflict, service_unavailable,
+            and internal_error.
+          example: resource_not_found
+        detail:
+          type: string
+          description: Human-readable detail that never contains secret values.
+          example: The requested resource does not exist.
+        instance:
+          type: string
+          format: uri-reference
+          description: Occurrence identifier for support correlation.
+          example: urn:moco:request:11111111-1111-4111-8111-111111111111
+        requestId:
+          type: string
+          minLength: 1
+          description: Correlation identifier also returned in X-Request-ID.
+          example: 11111111-1111-4111-8111-111111111111
+        resourceId:
+          type: string
+          description: Existing resource ID when safely useful for conflict recovery.
+          example: 11111111-1111-4111-8111-111111111111
+        errors:
+          type: array
+          example:
+            - field: /name
+              code: invalid_format
+              message: must match the documented name format
+          items:
+            $ref: '#/components/schemas/problem-error'
+    problem-error:
+      title: ProblemError
+      type: object
+      description: Field-specific validation failure safe to expose to clients.
+      additionalProperties: false
+      required:
+        - message
+      properties:
+        field:
+          type: string
+          description: JSON Pointer or parameter name when the failure has a location.
+          example: /name
+        code:
+          type: string
+          minLength: 1
+          description: Stable machine-readable validation code.
+          example: invalid_format
+        message:
+          type: string
+          minLength: 1
+          description: Human-readable message that never contains secret values.
+          example: must match the documented name format
+    audit-event-list:
+      title: AuditEventList
+      type: object
+      description: Ordered page from the append-only audit ledger.
+      additionalProperties: false
+      required:
+        - items
+        - hasMore
+        - nextAfterSequence
+      properties:
+        items:
+          type: array
+          example:
+            - sequence: 42
+              occurredAt: '2026-08-29T15:04:05Z'
+              requestId: 11111111-1111-4111-8111-111111111111
+              principalId: operator
+              method: GET
+              route: /api/v1/tenants/11111111-1111-4111-8111-111111111111
+              statusCode: 200
+              outcome: success
+          items:
+            $ref: '#/components/schemas/audit-event'
+        hasMore:
+          type: boolean
+          description: Whether another event exists after the last returned sequence.
+          example: false
+        nextAfterSequence:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+          description: Exclusive checkpoint for the next page; null when hasMore is false.
+          example:
+    audit-event:
+      title: AuditEvent
+      type: object
+      description: Request audit metadata without request bodies, query strings, credentials, or plaintext secret paths.
+      additionalProperties: false
+      required:
+        - sequence
+        - occurredAt
+        - requestId
+        - method
+        - route
+        - statusCode
+        - outcome
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+          readOnly: true
+          example: 42
+        occurredAt:
+          type: string
+          format: date-time
+          readOnly: true
+          example: '2026-08-29T15:04:05Z'
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          readOnly: true
+          example: 11111111-1111-4111-8111-111111111111
+        principalId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          nullable: true
+          readOnly: true
+          description: Authenticated principal identifier; absent when authentication did not succeed.
+          example: operator
+        method:
+          type: string
+          minLength: 1
+          maxLength: 16
+          readOnly: true
+          example: GET
+        route:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          readOnly: true
+          description: Request path without its query string.
+          example: /api/v1/tenants/11111111-1111-4111-8111-111111111111
+        statusCode:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+          readOnly: true
+          example: 200
+        outcome:
+          type: string
+          enum:
+            - success
+            - failure
+          readOnly: true
+          example: success
+        secretPathSha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          minLength: 64
+          maxLength: 64
+          nullable: true
+          readOnly: true
+          description: Keyed HMAC-SHA-256 digest of the decoded logical secret path or list prefix; the plaintext is never persisted and the deployment key is never returned.
+          example: 2bb80d537b1da3e38bd30361aa855686bde0ba53e611d8a8a5e47993629e366f
+    audit-retention-result:
+      title: AuditRetentionResult
+      type: object
+      additionalProperties: false
+      description: Bounded local audit retention result. It contains no event contents; remaining is a current diagnostic rather than a historical snapshot.
+      required:
+        - before
+        - complete
+        - deleted
+        - dryRun
+        - hasMore
+        - remaining
+      properties:
+        before:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Normalized UTC cutoff used by the retention batch.
+          example: '2026-08-01T00:00:00Z'
+        deleted:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 200
+          readOnly: true
+          description: Number of events deleted by this bounded request.
+          example: 50
+        remaining:
+          type: integer
+          format: int64
+          minimum: 0
+          readOnly: true
+          description: Current number of events strictly before the cutoff; this is not a snapshot.
+          example: 12
+        hasMore:
+          type: boolean
+          readOnly: true
+          description: Whether another bounded retention request is needed for the cutoff.
+          example: true
+        complete:
+          type: boolean
+          readOnly: true
+          description: True when no event currently remains before the cutoff.
+          example: false
+        dryRun:
+          type: boolean
+          readOnly: true
+          description: True when the request only measured the matching count and made no deletion.
+          example: false
+    encryption-rotation-result:
+      type: object
+      additionalProperties: false
+      required:
+        - activeRootKeyEpoch
+        - activeRootKeyId
+        - complete
+        - hasMore
+        - nextAfterTenantId
+        - nextAfterVaultId
+        - remainingOldKeys
+        - rewrapped
+        - scanned
+        - skipped
+      description: Bounded root-key rewrap result. It contains counts and a keyset checkpoint only; no key material or secret data is returned.
+      properties:
+        activeRootKeyId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          readOnly: true
+          description: Identifier of the deployment key era used for new and rewrapped vault keys.
+          example: root-v2
+        activeRootKeyEpoch:
+          type: integer
+          format: int64
+          minimum: 0
+          readOnly: true
+          description: Monotonic deployment epoch that fences stale server processes during rollout.
+          example: 2
+        scanned:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 200
+          readOnly: true
+          example: 50
+        rewrapped:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 200
+          readOnly: true
+          example: 47
+        skipped:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 200
+          readOnly: true
+          description: Keys already using the active era or changed by another worker before this request committed.
+          example: 3
+        hasMore:
+          type: boolean
+          readOnly: true
+          example: true
+        complete:
+          type: boolean
+          readOnly: true
+          description: True when no vault key currently uses an older root-key era. A fresh full sweep should be run after transient failures or concurrent maintenance.
+          example: false
+        nextAfterTenantId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          nullable: true
+          readOnly: true
+          description: Checkpoint for the next page; null when hasMore is false.
+          example: 11111111-1111-4111-8111-111111111111
+        nextAfterVaultId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          nullable: true
+          readOnly: true
+          description: Checkpoint for the next page; null when hasMore is false.
+          example: 22222222-2222-4222-8222-222222222222
+        remainingOldKeys:
+          type: integer
+          format: int64
+          minimum: 0
+          readOnly: true
+          description: Current count of vault keys whose root key ID differs from the active era; this is not a snapshot.
+          example: 3
+    encryption-rotation-status:
+      title: EncryptionRotationStatus
+      type: object
+      additionalProperties: false
+      required:
+        - activeRootKeyEpoch
+        - activeRootKeyId
+        - complete
+        - remainingOldKeys
+      description: Current shared root-key rotation state. Counts are point-in-time diagnostics, not a lock or a snapshot; no key material is returned.
+      properties:
+        activeRootKeyId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          readOnly: true
+          description: Identifier of the deployment key era currently recorded in the shared store.
+          example: root-v2
+        activeRootKeyEpoch:
+          type: integer
+          format: int64
+          minimum: 0
+          readOnly: true
+          description: Monotonic deployment epoch currently recorded in the shared store.
+          example: 2
+        remainingOldKeys:
+          type: integer
+          format: int64
+          minimum: 0
+          readOnly: true
+          description: Current count of vault keys whose root-key ID differs from the active era; this is not a snapshot.
+          example: 3
+        complete:
+          type: boolean
+          readOnly: true
+          description: True when no persisted vault key currently uses an older root-key era.
+          example: false
+  responses:
+    unauthorized:
+      description: Bearer authentication is missing or invalid.
+      headers:
+        WWW-Authenticate:
+          $ref: '#/components/headers/www-authenticate'
+        X-Request-ID:
+          $ref: '#/components/headers/request-id'
+      content:
+        application/problem+json:
+          example:
+            type: https://moco.araihu.com/problems/unauthorized
+            title: Unauthorized
+            status: 401
+            code: unauthorized
+            requestId: 11111111-1111-4111-8111-111111111111
+          schema:
+            $ref: '#/components/schemas/problem'
+    forbidden:
+      description: The authenticated principal lacks permission for the operation.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/request-id'
+      content:
+        application/problem+json:
+          example:
+            type: https://moco.araihu.com/problems/forbidden
+            title: Forbidden
+            status: 403
+            code: forbidden
+            requestId: 11111111-1111-4111-8111-111111111111
+          schema:
+            $ref: '#/components/schemas/problem'
+    internal-error:
+      description: The server failed to complete the request.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/request-id'
+      content:
+        application/problem+json:
+          example:
+            type: https://moco.araihu.com/problems/internal-error
+            title: Internal Server Error
+            status: 500
+            code: internal_error
+            requestId: 11111111-1111-4111-8111-111111111111
+          schema:
+            $ref: '#/components/schemas/problem'
+    service-unavailable:
+      description: |
+        The service or a required dependency is temporarily unavailable. This may be
+        emitted by Mocó or by the deployment edge; clients should retry after the
+        advertised interval with bounded exponential backoff.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/retry-after'
+        X-Request-ID:
+          $ref: '#/components/headers/request-id'
+      content:
+        application/problem+json:
+          example:
+            type: https://moco.araihu.com/problems/service-unavailable
+            title: Service Unavailable
+            status: 503
+            code: service_unavailable
+            requestId: 11111111-1111-4111-8111-111111111111
+          schema:
+            $ref: '#/components/schemas/problem'
+    bad-request:
+      description: Request parameters, headers, or body are invalid.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/request-id'
+      content:
+        application/problem+json:
+          example:
+            type: https://moco.araihu.com/problems/bad-request
+            title: Bad Request
+            status: 400
+            code: invalid_request
+            requestId: 11111111-1111-4111-8111-111111111111
+          schema:
+            $ref: '#/components/schemas/problem'
+    precondition-failed:
+      description: A conditional request header does not match current resource state.
+      headers:
+        ETag:
+          $ref: '#/components/headers/etag'
+        X-Request-ID:
+          $ref: '#/components/headers/request-id'
+      content:
+        application/problem+json:
+          example:
+            type: https://moco.araihu.com/problems/precondition-failed
+            title: Precondition Failed
+            status: 412
+            code: etag_mismatch
+            requestId: 11111111-1111-4111-8111-111111111111
+          schema:
+            $ref: '#/components/schemas/problem'
+    conflict:
+      description: |
+        The request conflicts with current resource state, a uniqueness constraint,
+        existing children, or a prior idempotency-key body. Uniqueness conflicts set
+        `resourceId` when the existing resource can be identified safely; clients
+        may use it to adopt rather than create a duplicate.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/request-id'
+      content:
+        application/problem+json:
+          example:
+            type: https://moco.araihu.com/problems/conflict
+            title: Conflict
+            status: 409
+            code: resource_conflict
+            requestId: 11111111-1111-4111-8111-111111111111
+          schema:
+            $ref: '#/components/schemas/problem'
+  parameters:
+    request-id:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: Optional caller correlation ID; the server returns the effective ID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    audit-after-sequence:
+      name: afterSequence
+      in: query
+      required: false
+      description: Exclusive audit sequence checkpoint. Use the returned nextAfterSequence to continue the same ordered ledger page.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        default: 0
+        example: 42
+    limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 200
+        default: 50
+    audit-before:
+      name: before
+      in: query
+      required: true
+      description: Delete events strictly older than this UTC cutoff. The cutoff must be at least one hour old for deletion. Repeat the same cutoff until the response reports complete=true; use dryRun=true to preview without deleting.
+      schema:
+        type: string
+        format: date-time
+        minLength: 1
+        maxLength: 64
+        example: '2026-08-01T00:00:00Z'
+    audit-dry-run:
+      name: dryRun
+      in: query
+      required: false
+      description: Preview the current matching count without deleting events. A dry-run result is informational and must not be repeated as a convergence loop.
+      schema:
+        type: boolean
+        default: false
+    encryption-after-tenant-id:
+      name: afterTenantId
+      in: query
+      required: false
+      description: Exclusive tenant identifier checkpoint returned with the preceding rotation page. Supply it together with afterVaultId.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    encryption-after-vault-id:
+      name: afterVaultId
+      in: query
+      required: false
+      description: Exclusive vault identifier checkpoint returned with the preceding rotation page. Supply it together with afterTenantId.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+  headers:
+    retry-after:
+      description: Delay in seconds before retrying the request.
+      required: true
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+      example: 5
+    etag:
+      description: |
+        Opaque strong validator for conditional requests. The value is a quoted
+        entity-tag; clients must treat it as opaque and send the complete value back.
+        `If-Match` accepts one or more strong tags or `*`; `If-None-Match` accepts a
+        comma-separated list (including weak tags) for reads and only `*` for PUT.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+      example: '"tenant-3"'
+    request-id:
+      description: Server-selected request correlation identifier.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+      example: 11111111-1111-4111-8111-111111111111
+    www-authenticate:
+      description: Authentication challenge for a bearer credential.
+      required: true
+      schema:
+        type: string
+        enum:
+          - Bearer
+      example: Bearer
