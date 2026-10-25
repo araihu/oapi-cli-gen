@@ -30,7 +30,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: araihu/moco
-          ref: 385a3394f2369e946a8cdd0d2ac3b98d12d1d087
+          ref: e08a5663cf9cd3c9843b50aa976010460639c67e
           path: tmp/moco-source
           persist-credentials: false
       - name: Exercise generated CLI against real Moco

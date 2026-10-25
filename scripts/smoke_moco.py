@@ -55,26 +55,26 @@ def main():
                         return None
                     return result.stdout.strip() if header else json.loads(result.stdout)
 
-                tenant = invoke("tenants", "create-tenant", "--body-stdin", body={"name": "cli-smoke-tenant"})
+                tenant = invoke("tenants", "create", "--body-stdin", body={"name": "cli-smoke-tenant"})
                 tenant_id = tenant["id"]
-                etag = invoke("tenants", "get-tenant", "--tenant-id", tenant_id, "--response-header", "ETag", header=True)
-                invoke("tenants", "get-tenant", "--tenant-id", tenant_id, "--if-none-match", etag)
-                vault = invoke("vaults", "create-vault", "--tenant-id", tenant_id, "--body-stdin", body={"name": "cli-smoke-vault"})
+                etag = invoke("tenants", "get", "--tenant-id", tenant_id, "--response-header", "ETag", header=True)
+                invoke("tenants", "get", "--tenant-id", tenant_id, "--if-none-match", etag)
+                vault = invoke("vaults", "create", "--tenant-id", tenant_id, "--body-stdin", body={"name": "cli-smoke-vault"})
                 scope = ["--tenant-id", tenant_id, "--vault-id", vault["id"]]
                 value = base64.b64encode(b"isolated-generated-cli-secret").decode()
-                invoke("secrets", "put-secret", *scope, "--path", "prod/database", "--body-stdin", body={"value": value})
-                read = invoke("secrets", "get-secret", *scope, "--path", "prod/database")
+                invoke("secrets", "put", *scope, "--path", "prod/database", "--body-stdin", body={"value": value})
+                read = invoke("secrets", "get", *scope, "--path", "prod/database")
                 assert read["value"] == value, "generated CLI changed the secret value"
-                invoke("secrets", "get-secret-metadata", *scope, "--path", "prod/database")
-                invoke("secrets", "list-secrets", *scope, "--prefix", "prod/", "--limit", "10")
-                current = invoke("secrets", "get-secret", *scope, "--path", "prod/database", "--response-header", "ETag", header=True)
-                invoke("secrets", "put-secret", *scope, "--path", "prod/database", "--if-match", '"stale"', "--body-stdin", body={"value": value}, expected=4)
-                invoke("secrets", "delete-secret", *scope, "--path", "prod/database", "--if-match", current)
-                invoke("vaults", "delete-vault", *scope)
-                invoke("tenants", "delete-tenant", "--tenant-id", tenant_id)
+                invoke("secrets", "metadata", *scope, "--path", "prod/database")
+                invoke("secrets", "list", *scope, "--prefix", "prod/", "--limit", "10")
+                current = invoke("secrets", "get", *scope, "--path", "prod/database", "--response-header", "ETag", header=True)
+                invoke("secrets", "put", *scope, "--path", "prod/database", "--if-match", '"stale"', "--body-stdin", body={"value": value}, expected=4)
+                invoke("secrets", "delete", *scope, "--path", "prod/database", "--if-match", current)
+                invoke("vaults", "delete", *scope)
+                invoke("tenants", "delete", "--tenant-id", tenant_id)
                 unauthenticated = dict(client_environment)
                 unauthenticated.pop("MOCO_TOKEN")
-                invoke("tenants", "list-tenants", env=unauthenticated, expected=2)
+                invoke("tenants", "list", env=unauthenticated, expected=2)
                 with sqlite3.connect(root / "moco.db") as connection:
                     events = connection.execute("SELECT count(*) FROM audit_events WHERE outcome='success'").fetchone()[0]
                     assert events >= 6, "real mutations were not audited"

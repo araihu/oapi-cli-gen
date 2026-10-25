@@ -1,0 +1,21 @@
+overlay: 1.0.0
+info:
+  title: Mocó internal CLI metadata
+  version: 1.0.0
+actions:
+  - target: $.paths.*[?(@.operationId == 'getLiveness')]
+    update: {x-cli-group: health, x-cli-name: live}
+  - target: $.paths.*[?(@.operationId == 'getReadiness')]
+    update: {x-cli-group: health, x-cli-name: ready}
+  - target: $.paths.*[?(@.operationId == 'getAuthorizationSnapshot')]
+    update: {x-cli-group: authorization, x-cli-name: get}
+  - target: $.paths.*[?(@.operationId == 'replaceAuthorizationSnapshot')]
+    update: {x-cli-group: authorization, x-cli-name: set}
+  - target: $.paths.*[?(@.operationId == 'listAuditEvents')]
+    update: {x-cli-group: audit, x-cli-name: list}
+  - target: $.paths.*[?(@.operationId == 'purgeAuditEvents')]
+    update: {x-cli-group: audit, x-cli-name: purge}
+  - target: $.paths.*[?(@.operationId == 'rotateEncryptionKeys')]
+    update: {x-cli-group: encryption, x-cli-name: rotate}
+  - target: $.paths.*[?(@.operationId == 'getEncryptionStatus')]
+    update: {x-cli-group: encryption, x-cli-name: status}

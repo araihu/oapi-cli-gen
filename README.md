@@ -8,6 +8,10 @@ tree, help, flags and shell completion.
 The generated application has its own `go.mod`. Its source contains the client
 and CLI runtime; it does not import or execute this generator at runtime.
 
+CLI naming metadata can be maintained in a separate OpenAPI Overlay and merged
+by the API producer with Vacuum. The generator consumes the prepared bundle;
+it does not merge overlays or infer short command names from resource names.
+
 ## Generate a CLI
 
 Go 1.27.3 or newer is required. `mise` selects the latest stable Go.
@@ -16,7 +20,7 @@ Go 1.27.3 or newer is required. `mise` selects the latest stable Go.
 go install github.com/araihu/oapi-cli-gen/cmd/oapi-cli-gen@latest
 
 oapi-cli-gen generate \
-  --spec ./openapi.yaml \
+  --spec ./openapi.cli.json \
   --name inventory \
   --module example.com/inventory-cli \
   --out ./inventory-cli
@@ -43,7 +47,7 @@ The `generator` Go package exposes the same pipeline for build tools:
 
 ```go
 result, err := generator.Generate(ctx, generator.Options{
-    Spec: "openapi.yaml", Name: "inventory", Module: "example.com/inventory-cli",
+    Spec: "openapi.cli.json", Name: "inventory", Module: "example.com/inventory-cli",
 })
 if err != nil { return err }
 return result.Write("inventory-cli", false)
@@ -66,25 +70,35 @@ return result.Write("inventory-cli", false)
   before HTTP. JSON bodies are validated as requests against the embedded schema.
   The generated SDK performs the actual OpenAPI parameter serialization.
 
-Optional contract extensions customize the interface without hand-editing Go:
+CLI extensions customize the interface without hand-editing Go. Keep them in
+a separate overlay so the principal API contract stays neutral:
 
 ```yaml
-get:
-  operationId: getSecret
-  tags: [Secrets]
-  x-cli-name: get
-  x-cli-group: secrets
-  # x-cli-ignore: true excludes an operation from the CLI.
-  parameters:
-    - name: tenantId
-      in: path
-      required: true
-      x-cli-flag: tenant
-      schema: {type: string}
+overlay: 1.0.0
+info:
+  title: Inventory CLI metadata
+  version: 1.0.0
+actions:
+  - target: $.paths.*[?(@.operationId == 'getSecret')]
+    update:
+      x-cli-name: get
+      x-cli-group: secrets
 ```
 
-This exposes `inventory secrets get --tenant ...`. Names and collisions are
-checked; no API-domain behavior is hardcoded in the generator.
+The producer applies the overlay to a self-contained YAML bundle, then uses
+Vacuum to produce the CLI input bundle:
+
+```sh
+vacuum bundle --composed openapi.yaml openapi.bundle.yaml
+vacuum apply-overlay --fail-on-warnings openapi.bundle.yaml cli.overlay.yaml openapi.cli.yaml
+vacuum bundle --composed --format json openapi.cli.yaml openapi.cli.json
+```
+
+This exposes `inventory secrets get`. The principal operation ID remains
+`getSecret`; without metadata, the default command remains `get-secret`.
+`x-cli-flag` can rename a parameter flag, and `x-cli-ignore: true` can exclude
+an operation, through overlay actions targeting those elements. Names and
+collisions are checked; API-domain behavior belongs to the producer's metadata.
 
 ## Authentication, TLS and input
 
@@ -147,10 +161,10 @@ the exit status reports that failure. JSON output is buffered within the bound.
 ## Regeneration and reproducibility
 
 ```sh
-oapi-cli-gen generate --spec openapi.yaml --name inventory \
+oapi-cli-gen generate --spec openapi.cli.json --name inventory \
   --module example.com/inventory-cli --out inventory-cli --check
 
-oapi-cli-gen generate --spec openapi.yaml --name inventory \
+oapi-cli-gen generate --spec openapi.cli.json --name inventory \
   --module example.com/inventory-cli --out inventory-cli --update
 ```
 
@@ -170,18 +184,21 @@ contracts; explicit custom Go types/imports are code-generation inputs.
 
 ## Moco acceptance example
 
-The checked-in public and internal fixtures are snapshots from
-`araihu/moco@385a3394f2369e946a8cdd0d2ac3b98d12d1d087`.
+Moco owns the principal contracts, separate `openapi/overlays/cli.*.yaml`
+metadata, and Vacuum-produced `openapi/bundled/cli/*.json` distributions.
+The checked-in fixtures mirror the Moco revision pinned in the CI workflow.
+The demo consumes `testdata/moco/cli/public.json`; the generator never decorates
+the principal Moco contract itself.
 
 ```sh
 make demo
 bin/moco --help
-bin/moco secrets get-secret --help
+bin/moco secrets get --help
 
 export MOCO_SERVER=https://moco.example.com:8443
 # Supply MOCO_TOKEN through your credential mechanism.
-bin/moco tenants list-tenants
-bin/moco secrets get-secret --tenant-id TENANT --vault-id VAULT --path prod/database
+bin/moco tenants list
+bin/moco secrets get --tenant-id TENANT --vault-id VAULT --path prod/database
 
 make smoke-moco MOCO_SOURCE=../moco
 ```
@@ -189,7 +206,11 @@ make smoke-moco MOCO_SOURCE=../moco
 The smoke test starts its own temporary real Moco server and exercises tenant,
 vault and secret lifecycles, conditional requests, missing credentials and
 transactional audit. It accepts no deployed URL or production credentials.
-Both Moco contracts also generate and compile in the automated tests.
+Both Moco CLI bundles also generate and compile in the automated tests, which
+check the explicit short names and contract equivalence. CI compares the
+principal bundles, overlays and CLI bundles with the pinned Moco checkout.
+Use `make refresh-moco-fixtures` after rebuilding the producer; details live in
+[`testdata/moco/README.md`](testdata/moco/README.md).
 
 ## Development and current scope
 

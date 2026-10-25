@@ -1,9 +1,9 @@
 GO := go
 MOCO_SOURCE ?= ../moco
 GENERATOR := bin/oapi-cli-gen
-DEMO_ARGS := --spec testdata/moco/public.yaml --name moco --module github.com/araihu/oapi-cli-gen/examples/moco --out dist/moco
+DEMO_ARGS := --spec testdata/moco/cli/public.json --name moco --module github.com/araihu/oapi-cli-gen/examples/moco --out dist/moco
 
-.PHONY: build demo fmt-check vet test race vulncheck check-generated check smoke-moco
+.PHONY: build demo fmt-check vet test race vulncheck check-generated check verify-moco-fixtures refresh-moco-fixtures smoke-moco
 
 build:
 	GOWORK=off $(GO) build -trimpath -o $(GENERATOR) ./cmd/oapi-cli-gen
@@ -37,7 +37,23 @@ check-generated: demo
 
 check: fmt-check vet test race vulncheck check-generated
 
-smoke-moco: demo
+verify-moco-fixtures:
+	@set -eu; for contract in public internal; do \
+		diff -u "$(MOCO_SOURCE)/openapi/bundled/$$contract.yaml" "testdata/moco/$$contract.yaml"; \
+		diff -u "$(MOCO_SOURCE)/openapi/overlays/cli.$$contract.yaml" "testdata/moco/overlays/cli.$$contract.yaml"; \
+		diff -u "$(MOCO_SOURCE)/openapi/bundled/cli/$$contract.json" "testdata/moco/cli/$$contract.json"; \
+	done
+
+refresh-moco-fixtures:
+	$(MAKE) -C "$(MOCO_SOURCE)" cli-spec-check
+	@set -eu; mkdir -p testdata/moco/overlays testdata/moco/cli; \
+	for contract in public internal; do \
+		cp "$(MOCO_SOURCE)/openapi/bundled/$$contract.yaml" "testdata/moco/$$contract.yaml"; \
+		cp "$(MOCO_SOURCE)/openapi/overlays/cli.$$contract.yaml" "testdata/moco/overlays/cli.$$contract.yaml"; \
+		cp "$(MOCO_SOURCE)/openapi/bundled/cli/$$contract.json" "testdata/moco/cli/$$contract.json"; \
+	done
+
+smoke-moco: demo verify-moco-fixtures
 	@set -eu; test -f "$(MOCO_SOURCE)/go.mod"; \
 	build_dir=$$(mktemp -d); trap 'rm -rf "$$build_dir"' EXIT; \
 	GOWORK=off $(GO) -C "$(MOCO_SOURCE)" build -trimpath -o "$$build_dir/moco-server" ./cmd/moco-server; \
