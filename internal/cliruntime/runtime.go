@@ -1,7 +1,6 @@
 package cliruntime
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -112,7 +111,7 @@ func Parameters(item *openapi3.PathItem, op *openapi3.Operation) []*openapi3.Par
 // New creates a Cobra tree without making network requests or reading credentials.
 func New(name string, spec *openapi3.T, builders map[string]Builder) (*cobra.Command, error) {
 	prefix := envName(name)
-	options := &settings{server: defaultServer(spec), timeout: 60 * time.Second, format: "json", maxInput: 8 << 20, maxOutput: 64 << 20}
+	options := &settings{server: defaultServer(spec), timeout: 60 * time.Second, format: "table", maxInput: 8 << 20, maxOutput: 64 << 20}
 	if value, ok := os.LookupEnv(prefix + "_SERVER"); ok {
 		options.server = value
 	}
@@ -125,7 +124,10 @@ func New(name string, spec *openapi3.T, builders map[string]Builder) (*cobra.Com
 	flags.StringVar(&options.keyFile, "client-key", "", "PEM client private key for mutual TLS")
 	flags.BoolVar(&options.allowHTTP, "allow-http", false, "Explicitly allow HTTP outside loopback")
 	flags.DurationVar(&options.timeout, "timeout", options.timeout, "Complete request timeout")
-	flags.StringVar(&options.format, "output", options.format, "Response format: json or raw")
+	flags.StringVar(&options.format, "output", options.format, "Response format: table, json, csv or raw")
+	if err := root.RegisterFlagCompletionFunc("output", cobra.FixedCompletions([]string{"table", "json", "csv", "raw"}, cobra.ShellCompDirectiveNoFileComp)); err != nil {
+		return nil, err
+	}
 	flags.StringVar(&options.bodyFile, "body-file", "", "Request body file; '-' reads stdin")
 	flags.BoolVar(&options.bodyStdin, "body-stdin", false, "Read request body from stdin")
 	flags.StringVar(&options.contentType, "content-type", "", "Request body media type")
@@ -254,8 +256,8 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 	if options.timeout <= 0 || options.maxInput <= 0 || options.maxOutput <= 0 {
 		return usage("timeout and byte limits must be positive")
 	}
-	if options.format != "json" && options.format != "raw" {
-		return usage("--output must be json or raw")
+	if options.format != "table" && options.format != "json" && options.format != "csv" && options.format != "raw" {
+		return usage("--output must be table, json, csv or raw")
 	}
 	u, err := serverURL(options.server, options.allowHTTP)
 	if err != nil {
@@ -331,14 +333,5 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 	if len(data) == 0 {
 		return nil
 	}
-	if !json.Valid(data) {
-		return &ExitError{3, "response is not JSON; use --output raw"}
-	}
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, data, "", "  "); err != nil {
-		return &ExitError{3, "cannot format JSON response"}
-	}
-	pretty.WriteByte('\n')
-	_, err = pretty.WriteTo(cmd.OutOrStdout())
-	return err
+	return writeResponse(cmd.OutOrStdout(), data, options.format, options.maxOutput)
 }

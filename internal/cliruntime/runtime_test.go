@@ -76,6 +76,7 @@ func TestHelpAndValidationNeverSendRequests(t *testing.T) {
 		success    bool
 	}{
 		{"help", "", []string{"--help"}, true},
+		{"output format", "", []string{"public", "--output", "invalid"}, false},
 		{"missing path", "", []string{"items", "read"}, false},
 		{"invalid integer", "", []string{"items", "read", "--id", "private-marker"}, false},
 		{"integer constraint", "", []string{"items", "read", "--id", "0"}, false},
@@ -141,7 +142,7 @@ func TestBearerPublicTLSAndBody(t *testing.T) {
 		t.Fatalf("untrusted certificate accepted: %v", err)
 	}
 	for _, args := range [][]string{{"items", "read", "--id", "1"}, {"public"}, {"items", "create", "--body-stdin"}} {
-		out, _, err := runCommand(t, document(t), server.URL, `{"name":"accepted"}`, append(args, "--ca-file", ca)...)
+		out, _, err := runCommand(t, document(t), server.URL, `{"name":"accepted"}`, append(args, "--ca-file", ca, "--output", "json")...)
 		if err != nil || !strings.Contains(out, `"ok": true`) {
 			t.Fatalf("TLS request: %v: %s", err, out)
 		}
@@ -168,6 +169,7 @@ func TestResponseErrorsRedirectsAndLimits(t *testing.T) {
 		{"raw", "raw-bytes", 200, 0, []string{"--output", "raw"}, "raw-bytes"},
 		{"raw limit", "abcdef", 200, 3, []string{"--output", "raw", "--max-output-bytes", "3"}, "abc"},
 		{"ETag", `{}`, 200, 0, []string{"--response-header", "ETag"}, "\"etag\"\n"},
+		{"ETag CSV", `{}`, 200, 0, []string{"--response-header", "ETag", "--output", "csv"}, "\"etag\"\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

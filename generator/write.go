@@ -23,7 +23,7 @@ func managedPath(name string) bool {
 	if name == "internal/api/client.gen.go" || name == "internal/cli/commands.gen.go" {
 		return true
 	}
-	for _, file := range []string{"runtime.gen.go", "auth.gen.go", "input.gen.go"} {
+	for _, file := range []string{"runtime.gen.go", "auth.gen.go", "input.gen.go", "output.gen.go"} {
 		if name == "internal/cliruntime/"+file {
 			return true
 		}

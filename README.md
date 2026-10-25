@@ -141,8 +141,25 @@ to one minute. Request bodies default to an 8 MiB limit and responses to 64 MiB;
 
 ## Output and automation
 
-Successful responses are pretty-printed JSON on stdout. `--output raw` streams
-raw bytes; `--response-header ETag` prints one header instead of the body.
+Successful responses use an aligned table on stdout by default. Select
+`--output table`, `--output json` or `--output csv` explicitly:
+
+```sh
+moco tenants list                 # default table
+moco tenants list --output json   # complete response, including pagination
+moco tenants list --output csv    # header and one CSV record per item
+```
+
+Tables and CSV use sorted field names as columns. Objects produce one row;
+arrays produce one row per element. For an object containing an `items` array,
+they show those items; use JSON to retain the full envelope and pagination.
+Missing fields are empty, JSON null is `null`, and nested values use compact
+JSON cells. Numbers retain their original precision. Table cells escape control
+characters; CSV preserves values with standard quoting, including embedded
+commas, quotes and newlines. Empty collections produce no table or CSV output.
+
+`--output json` pretty-prints the complete JSON response. `--output raw` streams
+raw bytes; `--response-header ETag` prints one header instead of any body format.
 Empty responses and conditional HTTP 304 responses succeed without body output.
 Response data can contain secrets: stdout is intended for the caller's chosen
 destination. Credentials, request values and untrusted HTTP error bodies are
@@ -156,7 +173,9 @@ not included in error diagnostics.
 | 4 | Unsuccessful HTTP status, including an unfollowed redirect |
 
 Raw output may be partial if streaming fails or the response exceeds its bound;
-the exit status reports that failure. JSON output is buffered within the bound.
+the exit status reports that failure. Table, JSON and CSV output are buffered:
+invalid JSON or a response/formatting byte-limit failure produces no partial
+output. Scripts that parse responses must select `--output json` or `--output csv`.
 
 ## Regeneration and reproducibility
 

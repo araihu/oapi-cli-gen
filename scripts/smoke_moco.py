@@ -2,6 +2,8 @@
 """Exercise the generated client against an isolated, real Moco executable."""
 import argparse
 import base64
+import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -46,17 +48,27 @@ def main():
                     assert time.monotonic() < deadline, "isolated Moco did not become ready"
                     time.sleep(.05)
 
-                def invoke(*args, body=None, expected=0, env=None, header=False):
-                    result = subprocess.run([str(options.cli.resolve()), *args], env=env or client_environment,
+                def invoke(*args, body=None, expected=0, env=None, header=False, output="json"):
+                    result = subprocess.run([str(options.cli.resolve()), *args, "--output", output], env=env or client_environment,
                                             input=None if body is None else json.dumps(body), text=True, capture_output=True, timeout=10)
                     assert result.returncode == expected, f"generated CLI exit status {result.returncode}: {result.stderr}"
                     assert token not in result.stderr, "credential leaked to stderr"
                     if expected or not result.stdout:
                         return None
-                    return result.stdout.strip() if header else json.loads(result.stdout)
+                    if header or output == "table":
+                        return result.stdout.strip()
+                    if output == "csv":
+                        return list(csv.DictReader(io.StringIO(result.stdout)))
+                    return json.loads(result.stdout)
 
                 tenant = invoke("tenants", "create", "--body-stdin", body={"name": "cli-smoke-tenant"})
                 tenant_id = tenant["id"]
+                table = invoke("tenants", "list", output="table")
+                assert tenant_id in table and "cli-smoke-tenant" in table, "table omitted tenant data"
+                rows = invoke("tenants", "list", output="csv")
+                assert len(rows) == 1 and rows[0]["id"] == tenant_id and rows[0]["name"] == "cli-smoke-tenant", "CSV changed tenant data"
+                page = invoke("tenants", "list")
+                assert page["items"][0]["id"] == tenant_id and "page" in page, "JSON lost pagination metadata"
                 etag = invoke("tenants", "get", "--tenant-id", tenant_id, "--response-header", "ETag", header=True)
                 invoke("tenants", "get", "--tenant-id", tenant_id, "--if-none-match", etag)
                 vault = invoke("vaults", "create", "--tenant-id", tenant_id, "--body-stdin", body={"name": "cli-smoke-vault"})
@@ -79,7 +91,7 @@ def main():
                     events = connection.execute("SELECT count(*) FROM audit_events WHERE outcome='success'").fetchone()[0]
                     assert events >= 6, "real mutations were not audited"
                 print(json.dumps({"mocoSmoke": "passed", "generatedCLI": True, "conditionalRequests": True, "transactionalAudit": True,
-                                  "secretRoundTrip": True, "credentialRedaction": True}), flush=True)
+                                  "secretRoundTrip": True, "credentialRedaction": True, "outputFormats": ["table", "json", "csv"]}), flush=True)
             finally:
                 if server.poll() is None:
                     server.terminate()

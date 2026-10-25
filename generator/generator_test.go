@@ -116,9 +116,15 @@ func TestGeneratedClientRunsSDKSerialization(t *testing.T) {
 	if _, _, err := run("", "--help"); err != nil || calls.Load() != 0 {
 		t.Fatal("help failed or sent requests")
 	}
-	out, stderr, err := run("", "pets", "get", "--pet-id", "9007199254740993", "--tag", "a/b ?", "--tag", "second", "--if-match", `"v1"`, "--query-server", "parameter-value", "--date", "2026-10-25")
+	out, stderr, err := run("", "pets", "get", "--pet-id", "9007199254740993", "--tag", "a/b ?", "--tag", "second", "--if-match", `"v1"`, "--query-server", "parameter-value", "--date", "2026-10-25", "--output", "json")
 	if err != nil || !strings.Contains(out, `"accepted": true`) {
 		t.Fatalf("get: %v %s %s", err, out, stderr)
+	}
+	for _, format := range []string{"table", "csv"} {
+		out, stderr, err := run("", "pets", "get", "--pet-id", "9007199254740993", "--limit", "3", "--tag", "a/b ?", "--tag", "second", "--if-match", `"v1"`, "--query-server", "parameter-value", "--date", "2026-10-25", "--output", format)
+		if err != nil || out != "accepted\ntrue\n" {
+			t.Fatalf("generated %s output: %v %s %s", format, err, out, stderr)
+		}
 	}
 	if _, stderr, err := run(`{"name":"Moco","species":"cat"}`, "pets", "create", "--body-stdin"); err != nil {
 		t.Fatalf("create: %v %s", err, stderr)
