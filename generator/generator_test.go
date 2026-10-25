@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,7 +94,7 @@ func TestGeneratedClientRunsSDKSerialization(t *testing.T) {
 			}
 		} else {
 			var body map[string]string
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["name"] != "Moco" {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["name"] != "Milo" {
 				t.Error("JSON body changed")
 			}
 			w.WriteHeader(201)
@@ -126,7 +125,7 @@ func TestGeneratedClientRunsSDKSerialization(t *testing.T) {
 			t.Fatalf("generated %s output: %v %s %s", format, err, out, stderr)
 		}
 	}
-	if _, stderr, err := run(`{"name":"Moco","species":"cat"}`, "pets", "create", "--body-stdin"); err != nil {
+	if _, stderr, err := run(`{"name":"Milo","species":"cat"}`, "pets", "create", "--body-stdin"); err != nil {
 		t.Fatalf("create: %v %s", err, stderr)
 	}
 	if _, stderr, err := run("", "health"); err != nil {
@@ -148,87 +147,6 @@ func TestGeneratedClientRunsSDKSerialization(t *testing.T) {
 	}
 	if calls.Load() != before {
 		t.Fatal("invalid input reached the server")
-	}
-}
-
-func TestMocoContractsGenerateCompilableIndependentClients(t *testing.T) {
-	for _, name := range []string{"public", "internal"} {
-		t.Run(name, func(t *testing.T) {
-			_, binary := buildProject(t, Options{Spec: fixture(t, "moco/cli/"+name+".json"), Name: "moco-" + name, Module: "example.com/moco-" + name})
-			command := exec.CommandContext(t.Context(), binary, "--help")
-			data, err := command.CombinedOutput()
-			if err != nil || !bytes.Contains(data, []byte("Available Commands:")) {
-				t.Fatalf("generated help: %v %s", err, data)
-			}
-			commands := map[string][][]string{
-				"public":   {{"tenants", "create"}, {"tenants", "get"}, {"vaults", "create"}, {"secrets", "put"}, {"secrets", "get"}, {"secrets", "metadata"}, {"service", "info"}},
-				"internal": {{"health", "live"}, {"health", "ready"}, {"authorization", "get"}, {"authorization", "set"}, {"audit", "list"}, {"encryption", "rotate"}},
-			}
-			for _, parts := range commands[name] {
-				command := exec.CommandContext(t.Context(), binary, append(parts, "--help")...)
-				data, err := command.CombinedOutput()
-				if err != nil {
-					t.Fatalf("metadata command %v: %v %s", parts, err, data)
-				}
-			}
-		})
-	}
-}
-
-func TestMocoMetadataPreservesPrincipalContracts(t *testing.T) {
-	var strip func(any) int
-	strip = func(value any) int {
-		count := 0
-		switch node := value.(type) {
-		case map[string]any:
-			for key, item := range node {
-				if strings.HasPrefix(key, "x-cli-") {
-					delete(node, key)
-					count++
-				} else {
-					count += strip(item)
-				}
-			}
-		case []any:
-			for _, item := range node {
-				count += strip(item)
-			}
-		}
-		return count
-	}
-	for _, name := range []string{"public", "internal"} {
-		base, err := loadSpec(t.Context(), fixture(t, "moco/"+name+".yaml"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		cli, err := loadSpec(t.Context(), fixture(t, "moco/cli/"+name+".json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var original, decorated any
-		data, err := json.Marshal(base)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := json.Unmarshal(data, &original); err != nil {
-			t.Fatal(err)
-		}
-		data, err = json.Marshal(cli)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := json.Unmarshal(data, &decorated); err != nil {
-			t.Fatal(err)
-		}
-		if strip(original) != 0 {
-			t.Fatal("principal contract contains CLI metadata")
-		}
-		if strip(decorated) == 0 {
-			t.Fatal("CLI fixture is missing producer metadata")
-		}
-		if !reflect.DeepEqual(original, decorated) {
-			t.Fatalf("%s metadata changed the API contract", name)
-		}
 	}
 }
 

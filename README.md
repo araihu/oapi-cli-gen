@@ -145,9 +145,9 @@ Successful responses use an aligned table on stdout by default. Select
 `--output table`, `--output json` or `--output csv` explicitly:
 
 ```sh
-moco tenants list                 # default table
-moco tenants list --output json   # complete response, including pagination
-moco tenants list --output csv    # header and one CSV record per item
+inventory pets list                 # default table
+inventory pets list --output json   # complete response, including pagination
+inventory pets list --output csv    # header and one CSV record per item
 ```
 
 Tables and CSV use sorted field names as columns. Objects produce one row;
@@ -201,35 +201,25 @@ execute Go, or download referenced URLs. Build generated code from reviewed
 contracts; explicit custom Go types/imports are code-generation inputs.
 `--require module@version` pins modules used by custom `x-go-type-import` hints.
 
-## Moco acceptance example
+## Generic acceptance example
 
-Moco owns the principal contracts, separate `openapi/overlays/cli.*.yaml`
-metadata, and Vacuum-produced `openapi/bundled/cli/*.json` distributions.
-The checked-in fixtures mirror the Moco revision pinned in the CI workflow.
-The demo consumes `testdata/moco/cli/public.json`; the generator never decorates
-the principal Moco contract itself.
+The repository's example is a small Pets API under `testdata/pets/`. Generate
+and compile it without a checkout of any consuming project:
 
 ```sh
 make demo
-bin/moco --help
-bin/moco secrets get --help
-
-export MOCO_SERVER=https://moco.example.com:8443
-# Supply MOCO_TOKEN through your credential mechanism.
-bin/moco tenants list
-bin/moco secrets get --tenant-id TENANT --vault-id VAULT --path prod/database
-
-make smoke-moco MOCO_SOURCE=../moco
+bin/pets --help
+bin/pets pets get --help
 ```
 
-The smoke test starts its own temporary real Moco server and exercises tenant,
-vault and secret lifecycles, conditional requests, missing credentials and
-transactional audit. It accepts no deployed URL or production credentials.
-Both Moco CLI bundles also generate and compile in the automated tests, which
-check the explicit short names and contract equivalence. CI compares the
-principal bundles, overlays and CLI bundles with the pinned Moco checkout.
-Use `make refresh-moco-fixtures` after rebuilding the producer; details live in
-[`testdata/moco/README.md`](testdata/moco/README.md).
+Automated tests compile independent applications and exercise them against
+isolated HTTP servers, covering request serialization, authentication, output
+formats and safe regeneration.
+
+Keep each application's generated CLI module, OpenAPI contracts/overlays,
+build targets and server integration tests in that application's repository.
+Pin the generator as a build tool there. The generated module carries its own
+client and runtime sources and needs no generator dependency at runtime.
 
 ## Development and current scope
 
@@ -239,8 +229,7 @@ make check
 
 Checks include formatting, vet, unit and executable integration tests, the race
 detector, deterministic generation, reference confinement, safe regeneration,
-and module-level vulnerability scans of both generator and generated client/binary. CI also
-executes the real Moco smoke test at the pinned server revision.
+and module-level vulnerability scans of both generator and generated client/binary.
 
 The current scope is OpenAPI 3.0/3.1 request/response operations with schema-based
 parameters. Swagger 2, OpenAPI 3.2, parameter `content`, callback/webhook listeners,

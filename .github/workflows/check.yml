@@ -26,14 +26,5 @@ jobs:
           cache: true
       - name: Check generator and generated CLI
         run: make check
-      - name: Check out the pinned Moco acceptance server
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: araihu/moco
-          ref: e08a5663cf9cd3c9843b50aa976010460639c67e
-          path: tmp/moco-source
-          persist-credentials: false
-      - name: Exercise generated CLI against real Moco
-        run: make smoke-moco MOCO_SOURCE=tmp/moco-source
       - name: Reject source drift
         run: git diff --exit-code
