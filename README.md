@@ -14,7 +14,7 @@ it does not merge overlays or infer short command names from resource names.
 
 ## Generate a CLI
 
-Go 1.27.3 or newer is required. `mise` selects the latest stable Go.
+Go 1.27.3 or newer is required. `mise` selects Go 1.27.3.
 
 ```sh
 go install github.com/araihu/oapi-cli-gen/cmd/oapi-cli-gen@latest
