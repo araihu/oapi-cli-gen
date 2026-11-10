@@ -83,6 +83,8 @@ actions:
     update:
       x-cli-name: get
       x-cli-group: secrets
+      x-cli-description: Retrieve a secret by name.
+      x-cli-example: inventory secrets get --name demo
   - target: $.paths.*[?(@.operationId == 'listSecretVersions')]
     update:
       x-cli-name: list
@@ -103,6 +105,10 @@ list specifies each group in order, as in `inventory secrets versions list`.
 An empty string or list places the command at the root. Each segment must be
 a nonempty kebab-case name. Group names `help` and `completion` are reserved.
 Each parent can contain distinct leaf commands and child groups.
+
+Use `x-cli-description` to override the OpenAPI description in command help and
+`x-cli-example` to supply examples. Both accept strings, including YAML block
+scalars for multiline help.
 
 The original operation IDs still identify the HTTP requests. With the
 `Secrets` tag, the default for `getSecret` is `inventory secrets get-secret`.
@@ -169,11 +175,15 @@ characters; CSV preserves values with standard quoting, including embedded
 commas, quotes and newlines. Empty collections produce no table or CSV output.
 
 `--output json` pretty-prints the complete JSON response. `--output raw` streams
-raw bytes; `--response-header ETag` prints one header instead of any body format.
+raw bytes. Successful `text/event-stream` responses stream as raw bytes by
+default. An explicit `--output` overrides the default.
+`--response-header ETag` prints one header instead of any body format.
 Empty responses and conditional HTTP 304 responses succeed without body output.
 Response data can contain secrets: stdout is intended for the caller's chosen
 destination. Credentials, request values and untrusted HTTP error bodies are
-not included in error diagnostics.
+not included in error diagnostics. For an `application/problem+json` response,
+the CLI can append a short `code` from the response schema’s declared enum,
+for example `HTTP 409 Conflict (state_conflict)`.
 
 | Exit code | Meaning |
 | --- | --- |

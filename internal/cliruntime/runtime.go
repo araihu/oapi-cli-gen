@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"slices"
@@ -191,7 +192,7 @@ func New(name string, spec *openapi3.T, builders map[string]Builder) (*cobra.Com
 	flags.StringVar(&options.keyFile, "client-key", "", "PEM client private key for mutual TLS")
 	flags.BoolVar(&options.allowHTTP, "allow-http", false, "Explicitly allow HTTP outside loopback")
 	flags.DurationVar(&options.timeout, "timeout", options.timeout, "Complete request timeout")
-	flags.StringVar(&options.format, "output", options.format, "Response format: table, json, csv or raw")
+	flags.StringVar(&options.format, "output", options.format, "Response format: table, json, csv or raw (event streams default to raw)")
 	if err := root.RegisterFlagCompletionFunc("output", cobra.FixedCompletions([]string{"table", "json", "csv", "raw"}, cobra.ShellCompDirectiveNoFileComp)); err != nil {
 		return nil, err
 	}
@@ -241,7 +242,11 @@ func New(name string, spec *openapi3.T, builders map[string]Builder) (*cobra.Com
 			if childCommand(parent, leaf) != nil {
 				return nil, fmt.Errorf("CLI command collision: %s %s", parent.CommandPath(), leaf)
 			}
-			command := &cobra.Command{Use: leaf, Short: op.Summary, Long: op.Description, Args: cobra.NoArgs}
+			command := &cobra.Command{
+				Use: leaf, Short: op.Summary, Args: cobra.NoArgs,
+				Long:    extension(op.Extensions, "x-cli-description", op.Description),
+				Example: extension(op.Extensions, "x-cli-example", ""),
+			}
 			if op.Deprecated {
 				command.Deprecated = "deprecated by the OpenAPI contract"
 			}
@@ -348,18 +353,12 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(req)
 	if err != nil {
-		message := "request transport failed"
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			message = "request timed out"
-		} else if errors.Is(ctx.Err(), context.Canceled) {
-			message = "request cancelled"
-		}
-		return &ExitError{3, message}
+		return transportError(ctx, "request transport failed")
 	}
 	defer response.Body.Close()
+	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if (response.StatusCode < 200 || response.StatusCode >= 300) && response.StatusCode != 304 {
-		// An untrusted error response may echo credentials or secret request data.
-		return &ExitError{4, fmt.Sprintf("HTTP %d %s", response.StatusCode, http.StatusText(response.StatusCode))}
+		return httpFailure(op, response, mediaType, options.maxOutput)
 	}
 	if options.responseHeader != "" {
 		value := response.Header.Get(options.responseHeader)
@@ -369,23 +368,86 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 		_, err = fmt.Fprintln(cmd.OutOrStdout(), value)
 		return err
 	}
-	if options.format == "raw" {
+	format := options.format
+	if mediaType == "text/event-stream" && !cmd.Flags().Changed("output") {
+		format = "raw"
+	}
+	if format == "raw" {
 		_, err := io.Copy(cmd.OutOrStdout(), io.LimitReader(response.Body, options.maxOutput))
 		if err != nil {
-			return &ExitError{3, "cannot stream response"}
+			return transportError(ctx, "cannot stream response")
 		}
 		var probe [1]byte
-		if n, err := response.Body.Read(probe[:]); n > 0 || (err != nil && err != io.EOF) {
+		if n, err := io.ReadFull(response.Body, probe[:]); n > 0 {
 			return &ExitError{3, "response exceeds the configured byte limit"}
+		} else if err != nil && err != io.EOF {
+			return transportError(ctx, "cannot stream response")
 		}
 		return nil
 	}
 	data, err := boundedRead(response.Body, options.maxOutput)
 	if err != nil {
-		return &ExitError{3, "cannot read response within the configured byte limit"}
+		return transportError(ctx, "cannot read response within the configured byte limit")
 	}
 	if len(data) == 0 {
 		return nil
 	}
-	return writeResponse(cmd.OutOrStdout(), data, options.format, options.maxOutput)
+	return writeResponse(cmd.OutOrStdout(), data, format, options.maxOutput)
+}
+
+// transportError keeps transport details out of diagnostics and reports the
+// request deadline even when it expires after the response headers arrive.
+func transportError(ctx context.Context, message string) error {
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
+		message = "request timed out"
+	case context.Canceled:
+		message = "request cancelled"
+	}
+	return &ExitError{3, message}
+}
+
+func httpFailure(op *openapi3.Operation, response *http.Response, mediaType string, maxOutput int64) error {
+	status := response.StatusCode
+	failure := &ExitError{4, fmt.Sprintf("HTTP %d %s", status, http.StatusText(status))}
+	if mediaType != "application/problem+json" || op.Responses == nil {
+		return failure
+	}
+	contract := op.Responses.Status(status)
+	if contract == nil {
+		contract = op.Responses.Default()
+	}
+	if contract == nil || contract.Value == nil {
+		return failure
+	}
+	media := contract.Value.Content[mediaType]
+	if media == nil || media.Schema == nil || media.Schema.Value == nil {
+		return failure
+	}
+	code := media.Schema.Value.Properties["code"]
+	if code == nil || code.Value == nil || len(code.Value.Enum) == 0 {
+		return failure
+	}
+	// Error bodies can echo sensitive request data. Only display a documented
+	// short code that is safe to write to the terminal.
+	data, err := boundedRead(response.Body, min(maxOutput, 1<<20))
+	if err != nil {
+		return failure
+	}
+	var problem struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(data, &problem) != nil || problem.Code == "" || len(problem.Code) > 64 ||
+		strings.IndexFunc(problem.Code, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.')
+		}) >= 0 {
+		return failure
+	}
+	for _, value := range code.Value.Enum {
+		if allowed, ok := value.(string); ok && allowed == problem.Code {
+			failure.Message += " (" + problem.Code + ")"
+			break
+		}
+	}
+	return failure
 }
