@@ -76,6 +76,8 @@ func TestHelpAndValidationNeverSendRequests(t *testing.T) {
 		success    bool
 	}{
 		{"help", "", []string{"--help"}, true},
+		{"group help", "", []string{"items"}, true},
+		{"unknown subcommand", "", []string{"items", "typo"}, false},
 		{"output format", "", []string{"public", "--output", "invalid"}, false},
 		{"missing path", "", []string{"items", "read"}, false},
 		{"invalid integer", "", []string{"items", "read", "--id", "private-marker"}, false},

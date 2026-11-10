@@ -127,9 +127,12 @@ func commandParent(root *cobra.Command, groups []string) (*cobra.Command, error)
 			if parent == root {
 				short = "Operations tagged " + group
 			}
-			child = &cobra.Command{Use: group, Short: short}
+			child = &cobra.Command{
+				Use: group, Short: short, Args: cobra.NoArgs,
+				RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+			}
 			parent.AddCommand(child)
-		} else if child.RunE != nil {
+		} else if !child.HasSubCommands() {
 			return nil, fmt.Errorf("CLI group collision: %s %s", parent.CommandPath(), group)
 		}
 		parent = child
