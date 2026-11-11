@@ -46,7 +46,11 @@ func runCommand(t *testing.T, spec *openapi3.T, server, body string, args ...str
 			if input.Body != nil {
 				method = "POST"
 			}
-			return http.NewRequest(method, strings.TrimRight(server, "/")+path, bytes.NewReader(input.Body))
+			req, err := http.NewRequest(method, strings.TrimRight(server, "/")+path, bytes.NewReader(input.Body))
+			if err == nil && input.ContentType != "" {
+				req.Header.Set("Content-Type", input.ContentType)
+			}
+			return req, err
 		}
 	}
 	root, err := New("demo", spec, map[string]Builder{"read": build("/items/1"), "create": build("/items"), "public": build("/public")})
@@ -554,6 +558,86 @@ func TestHTTPProblemCatalogKeepsRequestDataOutOfDiagnostics(t *testing.T) {
 				t.Fatalf("catalog=%t format=%s stdout=%q err=%v", catalog, format, out, err)
 			}
 		}
+	}
+}
+
+func TestHTTPProblemKeepsServerPrefixAndEmptyBodyContentTypeOutOfDiagnostics(t *testing.T) {
+	doc := document(t)
+	public := doc.Paths.Find("/public").Get
+	create := doc.Paths.Find("/items").Post
+	create.Security = &openapi3.SecurityRequirements{}
+	create.RequestBody.Value.Content["application/octet-stream"] = &openapi3.MediaType{}
+	link := openapi3.NewStringSchema()
+	link.Format = "uri"
+	schema := openapi3.NewObjectSchema().WithProperty("documentation", link)
+	for _, op := range []*openapi3.Operation{public, create} {
+		op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+			openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+		)})
+	}
+
+	const marker = "fixture-private-value"
+	const mediaType = "application/octet-stream; review=" + marker
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + marker + "/public":
+			if r.Method != http.MethodGet {
+				t.Error("expected a GET with the supplied server prefix")
+			}
+		case "/items":
+			if r.Method != http.MethodPost || r.Header.Get("Content-Type") != mediaType || r.ContentLength != 0 {
+				t.Error("expected an empty request body with the supplied content type")
+			}
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(w, `{"type":"?echo=%s","title":"%s","documentation":"https://docs.example.com/%s"}`, marker, marker, marker)
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		name, server string
+		args         []string
+	}{
+		{"server prefix", server.URL + "/" + marker, []string{"public"}},
+		{"empty body content type", server.URL, []string{"items", "create", "--body-stdin", "--content-type", mediaType}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, format := range []string{"table", "json"} {
+				args := append(append([]string{}, tc.args...), "--output", format)
+				out, _, err := runCommand(t, doc, tc.server, "", args...)
+				if err == nil || ExitCode(err) != 4 || out != "" || strings.Contains(err.Error(), marker) {
+					t.Fatalf("format=%s stdout=%q err=%v", format, out, err)
+				}
+				if format == "json" {
+					var problem httpProblem
+					if decodeErr := json.Unmarshal([]byte(err.Error()), &problem); decodeErr != nil ||
+						problem.Type != "about:blank" || problem.Title != "Conflict" || problem.Documentation != "" {
+						t.Fatalf("unsafe JSON diagnostic: %s", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestTruncatedHTTPProblemBodyIsTransportFailure(t *testing.T) {
+	doc := document(t)
+	doc.Paths.Find("/public").Get.Responses.Set("503", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Unavailable").WithContent(
+		openapi3.Content{"application/problem+json": {}},
+	)})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.Header().Set("Content-Length", "200")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"type":"urn:example:truncated","title":"Fixture error"}`)
+	}))
+	defer server.Close()
+	out, _, err := runCommand(t, doc, server.URL, "", "public", "--output", "json")
+	if err == nil || ExitCode(err) != 3 || err.Error() != "cannot read error response" || out != "" {
+		t.Fatalf("stdout = %q, err = %v", out, err)
 	}
 }
 

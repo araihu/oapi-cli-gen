@@ -436,7 +436,9 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if (response.StatusCode < 200 || response.StatusCode >= 300) && response.StatusCode != 304 {
 		// An error can reflect credentials or other values from the request.
-		privateInput := len(input.Body) != 0 || len(input.Values) != 0 || authenticated || options.certFile != ""
+		serverPath := u.EscapedPath()
+		privateInput := len(input.Body) != 0 || input.ContentType != "" || len(input.Values) != 0 ||
+			authenticated || options.certFile != "" || (serverPath != "" && serverPath != "/")
 		return httpFailure(ctx, op, response, mediaType, options.format, options.maxOutput, privateInput)
 	}
 	if options.responseHeader != "" {
@@ -501,7 +503,7 @@ type httpProblem struct {
 
 func httpFailure(ctx context.Context, op *openapi3.Operation, response *http.Response, mediaType, format string, maxOutput int64, privateInput bool) error {
 	problem, err := readHTTPProblem(op, response, mediaType, maxOutput, privateInput)
-	if err != nil && ctx.Err() != nil {
+	if err != nil && !errors.Is(err, errBodyTooLarge) {
 		return transportError(ctx, "cannot read error response")
 	}
 	if format == "json" {

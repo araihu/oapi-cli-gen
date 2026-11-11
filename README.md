@@ -192,14 +192,17 @@ one Problem Details object on stderr and leave stdout empty. The HTTP status
 comes from the response. Standard type URIs, including relative references,
 are processed independently of `code`.
 
-For requests with input or authentication, server-supplied problem metadata
-is restricted to the declared short code. A schema's optional
+For requests with input, authentication, a server path prefix, or a request
+Content-Type, server-supplied problem metadata is restricted to the declared
+short code. A schema's optional
 `x-cli-problem-catalog` can provide trusted metadata for both output modes.
 Set `type-prefix`, `documentation-base`, and `titles` keyed by declared code.
 The CLI appends the code to the type prefix and uses it as the fragment of the
 documentation URL. For public requests without input, a declared
 `documentation` URI can supply a printable HTTPS link. Unrecognized
-responses use `about:blank` and the HTTP status title.
+responses use `about:blank` and the HTTP status title. A truncated problem
+body is a transport failure. An oversized problem body uses the HTTP
+fallback without copying response data.
 
 JSON mode writes usage and transport failures as Problem Details on stderr.
 The `type` is `urn:cli:<name>:problem:<code>` and uses the generated CLI name.
