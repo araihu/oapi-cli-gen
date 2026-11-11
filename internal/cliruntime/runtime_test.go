@@ -386,10 +386,13 @@ func TestEventStreamDefaultsToRaw(t *testing.T) {
 	}
 }
 
-func TestHTTPProblemDisplaysOnlyDeclaredCodes(t *testing.T) {
+func TestHTTPProblemDisplaysOnlyDeclaredDiagnosticFields(t *testing.T) {
 	doc := document(t)
 	op := doc.Paths.Find("/public").Get
 	schema := openapi3.NewObjectSchema().WithProperty("code", openapi3.NewStringSchema().WithEnum("state_conflict", "idempotency_conflict", "unsafe\ncode"))
+	documentation := openapi3.NewStringSchema()
+	documentation.Format = "uri"
+	schema.WithProperty("documentation", documentation)
 	op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
 		openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
 	)})
@@ -398,10 +401,17 @@ func TestHTTPProblemDisplaysOnlyDeclaredCodes(t *testing.T) {
 		name, media, body, suffix string
 		limits                    []string
 	}{
-		{"state conflict", problemJSON, `{"code":"state_conflict","detail":"secret"}`, " (state_conflict)", nil},
+		{"state conflict with documentation", problemJSON, `{"code":"state_conflict","detail":"secret","documentation":"https://docs.example.com/problems#state_conflict"}`,
+			" (state_conflict)\nDocumentation: https://docs.example.com/problems#state_conflict", nil},
+		{"wrong link type", problemJSON, `{"code":"state_conflict","documentation":123}`, " (state_conflict)", nil},
+		{"non-HTTPS link", problemJSON, `{"code":"state_conflict","documentation":"http://docs.example.com/problems"}`, " (state_conflict)", nil},
+		{"relative link", problemJSON, `{"code":"state_conflict","documentation":"/problems"}`, " (state_conflict)", nil},
+		{"link credentials", problemJSON, `{"code":"state_conflict","documentation":"https://user:secret@docs.example.com/problems"}`, " (state_conflict)", nil},
+		{"link query", problemJSON, `{"code":"state_conflict","documentation":"https://docs.example.com/problems?token=secret"}`, " (state_conflict)", nil},
+		{"link control character", problemJSON, `{"code":"state_conflict","documentation":"https://docs.example.com/problems#\u001b[0m"}`, " (state_conflict)", nil},
 		{"idempotency conflict", problemJSON, `{"code":"idempotency_conflict"}`, " (idempotency_conflict)", nil},
 		{"other media", "application/json", `{"code":"state_conflict"}`, "", nil},
-		{"undeclared code", problemJSON, `{"code":"secret"}`, "", nil},
+		{"undeclared code", problemJSON, `{"code":"secret","documentation":"https://docs.example.com/problems"}`, "", nil},
 		{"control character", problemJSON, `{"code":"unsafe\ncode"}`, "", nil},
 		{"malformed body", problemJSON, `{"code":"state_conflict"`, "", nil},
 		{"oversize body", problemJSON, `{"code":"state_conflict"}`, "", []string{"--max-output-bytes", "8"}},
@@ -418,5 +428,24 @@ func TestHTTPProblemDisplaysOnlyDeclaredCodes(t *testing.T) {
 				t.Fatalf("stdout = %q, err = %v", out, err)
 			}
 		})
+	}
+}
+
+func TestHTTPProblemOmitsDocumentationOutsideContract(t *testing.T) {
+	doc := document(t)
+	op := doc.Paths.Find("/public").Get
+	schema := openapi3.NewObjectSchema().WithProperty("code", openapi3.NewStringSchema().WithEnum("state_conflict"))
+	op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+		openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+	)})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"code":"state_conflict","documentation":"https://docs.example.com/problems"}`)
+	}))
+	defer server.Close()
+	out, _, err := runCommand(t, doc, server.URL, "", "public")
+	if err == nil || ExitCode(err) != 4 || err.Error() != "HTTP 409 Conflict (state_conflict)" || out != "" {
+		t.Fatalf("stdout = %q, err = %v", out, err)
 	}
 }

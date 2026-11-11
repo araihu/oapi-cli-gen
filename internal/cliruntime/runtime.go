@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -427,18 +428,19 @@ func httpFailure(op *openapi3.Operation, response *http.Response, mediaType stri
 	if media == nil || media.Schema == nil || media.Schema.Value == nil {
 		return failure
 	}
-	code := media.Schema.Value.Properties["code"]
+	properties := media.Schema.Value.Properties
+	code := properties["code"]
 	if code == nil || code.Value == nil || len(code.Value.Enum) == 0 {
 		return failure
 	}
-	// Error bodies can echo sensitive request data. Only display a documented
-	// short code that is safe to write to the terminal.
+	// Display only the declared code and documentation link from the error body.
 	data, err := boundedRead(response.Body, min(maxOutput, 1<<20))
 	if err != nil {
 		return failure
 	}
 	var problem struct {
-		Code string `json:"code"`
+		Code          string          `json:"code"`
+		Documentation json.RawMessage `json:"documentation"`
 	}
 	if json.Unmarshal(data, &problem) != nil || problem.Code == "" || len(problem.Code) > 64 ||
 		strings.IndexFunc(problem.Code, func(r rune) bool {
@@ -449,8 +451,29 @@ func httpFailure(op *openapi3.Operation, response *http.Response, mediaType stri
 	for _, value := range code.Value.Enum {
 		if allowed, ok := value.(string); ok && allowed == problem.Code {
 			failure.Message += " (" + problem.Code + ")"
+			documentation := properties["documentation"]
+			if documentation != nil && documentation.Value != nil && documentation.Value.Format == "uri" {
+				if link := problemDocumentation(problem.Documentation); link != "" {
+					failure.Message += "\nDocumentation: " + link
+				}
+			}
 			break
 		}
 	}
 	return failure
+}
+
+// A problem link is printed for the user to inspect. Reject terminal controls
+// and URL fields commonly used for credentials before rendering it.
+func problemDocumentation(raw json.RawMessage) string {
+	var link string
+	if json.Unmarshal(raw, &link) != nil || len(link) > 2048 ||
+		strings.IndexFunc(link, func(r rune) bool { return r < '!' || r > '~' }) >= 0 {
+		return ""
+	}
+	u, err := url.Parse(link)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery {
+		return ""
+	}
+	return link
 }

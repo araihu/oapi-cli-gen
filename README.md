@@ -180,10 +180,12 @@ default. An explicit `--output` overrides the default.
 `--response-header ETag` prints one header instead of any body format.
 Empty responses and conditional HTTP 304 responses succeed without body output.
 Response data can contain secrets: stdout is intended for the caller's chosen
-destination. Credentials, request values and untrusted HTTP error bodies are
-not included in error diagnostics. For an `application/problem+json` response,
-the CLI can append a short `code` from the response schema’s declared enum,
-for example `HTTP 409 Conflict (state_conflict)`.
+destination. For an `application/problem+json` response, the CLI can append a
+short `code` from the response schema’s declared enum, for example
+`HTTP 409 Conflict (state_conflict)`. If the schema declares a
+`documentation` URI and the response supplies a printable HTTPS URL without
+userinfo or a query string, the CLI prints it on the next stderr line. The
+CLI does not open the link or print the rest of the error body.
 
 | Exit code | Meaning |
 | --- | --- |
