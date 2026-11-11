@@ -37,6 +37,67 @@ func ExitCode(err error) int {
 	return 2
 }
 
+// Diagnostic formats local failures. HTTP failures already carry the selected
+// representation, including Problem Details in JSON mode.
+func Diagnostic(root *cobra.Command, args []string, err error) string {
+	exitCode := ExitCode(err)
+	var code string
+	switch exitCode {
+	case 2:
+		code = "usage_error"
+	case 3:
+		code = "transport_error"
+	default:
+		return err.Error()
+	}
+	if diagnosticOutput(root, args) != "json" {
+		return err.Error()
+	}
+	diagnostic := struct {
+		Code     string `json:"code"`
+		Message  string `json:"message"`
+		ExitCode int    `json:"exitCode"`
+	}{Code: code, Message: err.Error(), ExitCode: exitCode}
+	data, _ := json.MarshalIndent(diagnostic, "", "  ")
+	return string(data)
+}
+
+// Cobra can reject a command or flag before parsing --output. Recover the
+// selected format while respecting known flag values and the option delimiter.
+func diagnosticOutput(root *cobra.Command, args []string) string {
+	var command *cobra.Command
+	if root != nil {
+		command, _, _ = root.Find(args)
+	}
+	var format string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		name, value, assigned := strings.Cut(arg[2:], "=")
+		if !assigned {
+			takesValue := name == "output"
+			if command != nil {
+				if flag := command.Flag(name); flag != nil {
+					takesValue = flag.NoOptDefVal == ""
+				}
+			}
+			if takesValue && i+1 < len(args) {
+				i++
+				value = args[i]
+			}
+		}
+		if name == "output" {
+			format = value
+		}
+	}
+	return format
+}
+
 type settings struct {
 	server, caFile, certFile, keyFile, format, bodyFile, contentType, responseHeader string
 	allowHTTP, bodyStdin                                                             bool

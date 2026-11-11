@@ -192,6 +192,10 @@ and leave stdout empty. The diagnostic includes the HTTP status and validated
 problem metadata. For an unrecognized response, it uses `about:blank` and
 the HTTP status title. HTTP failures still exit with code 4.
 
+JSON mode also writes usage and transport diagnostics to stderr with
+`code`, `message` and `exitCode`. The codes are `usage_error` for exit 2
+and `transport_error` for exit 3, including timeouts and cancellation.
+
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Successful HTTP result, including 304; or help/completion |

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -147,6 +148,45 @@ func TestGeneratedClientRunsSDKSerialization(t *testing.T) {
 	}
 	if calls.Load() != before {
 		t.Fatal("invalid input reached the server")
+	}
+
+	server.Close()
+	for _, tc := range []struct {
+		name, code string
+		exitCode   int
+		args       []string
+	}{
+		{"required flag", "usage_error", 2, []string{"pets", "get", "--output", "json"}},
+		{"unknown command", "usage_error", 2, []string{"unknown", "--output=json"}},
+		{"invalid flag before output", "usage_error", 2, []string{"health", "--timeout=invalid", "--output", "json"}},
+		{"unknown flag before output", "usage_error", 2, []string{"health", "--unknown", "--output=json"}},
+		{"last output wins", "usage_error", 2, []string{"health", "--output=table", "--timeout=invalid", "--output=json"}},
+		{"connection refused", "transport_error", 3, []string{"health", "--output=json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, stderr, err := run("", tc.args...)
+			var exit *exec.ExitError
+			var got struct {
+				Code     string `json:"code"`
+				Message  string `json:"message"`
+				ExitCode int    `json:"exitCode"`
+			}
+			if !errors.As(err, &exit) || exit.ExitCode() != tc.exitCode || out != "" ||
+				json.Unmarshal([]byte(stderr), &got) != nil || got.Code != tc.code ||
+				got.ExitCode != tc.exitCode || got.Message == "" {
+				t.Fatalf("exit=%v stdout=%q stderr=%q", err, out, stderr)
+			}
+		})
+	}
+	for _, args := range [][]string{
+		{"health", "--", "--output", "json"},
+		{"health", "--server", "--output", "json"},
+		{"health", "--output=json", "--timeout=invalid", "--output=table"},
+	} {
+		out, stderr, err := run("", args...)
+		if err == nil || out != "" || stderr == "" || json.Valid([]byte(stderr)) {
+			t.Fatalf("args=%v exit=%v stdout=%q stderr=%q", args, err, out, stderr)
+		}
 	}
 }
 
