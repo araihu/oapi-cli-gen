@@ -69,6 +69,73 @@ func extension(values map[string]any, key, fallback string) string {
 	return fallback
 }
 
+// commandGroups accepts the original single group and an ordered group path.
+func commandGroups(op *openapi3.Operation) ([]string, error) {
+	value, exists := op.Extensions["x-cli-group"]
+	if !exists {
+		if len(op.Tags) > 0 {
+			if group := Kebab(op.Tags[0]); group != "" {
+				return []string{group}, nil
+			}
+		}
+		return nil, nil
+	}
+
+	switch value := value.(type) {
+	case string:
+		if value == "" {
+			return nil, nil
+		}
+		return []string{value}, nil
+	case []any:
+		groups := make([]string, 0, len(value))
+		for _, item := range value {
+			group, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid x-cli-group for %s: each path segment must be a string", op.OperationID)
+			}
+			groups = append(groups, group)
+		}
+		return groups, nil
+	default:
+		return nil, fmt.Errorf("invalid x-cli-group for %s: expected a string or a list of strings", op.OperationID)
+	}
+}
+
+func childCommand(parent *cobra.Command, name string) *cobra.Command {
+	for _, child := range parent.Commands() {
+		if child.Name() == name {
+			return child
+		}
+	}
+	return nil
+}
+
+func commandParent(root *cobra.Command, groups []string) (*cobra.Command, error) {
+	parent := root
+	for _, group := range groups {
+		if group == "" || group != Kebab(group) {
+			return nil, errors.New("CLI group names must be nonempty kebab-case names")
+		}
+		if group == "help" || group == "completion" {
+			return nil, fmt.Errorf("reserved CLI group name: %s", group)
+		}
+		child := childCommand(parent, group)
+		if child == nil {
+			short := "Operations for " + group
+			if parent == root {
+				short = "Operations tagged " + group
+			}
+			child = &cobra.Command{Use: group, Short: short}
+			parent.AddCommand(child)
+		} else if child.RunE != nil {
+			return nil, fmt.Errorf("CLI group collision: %s %s", parent.CommandPath(), group)
+		}
+		parent = child
+	}
+	return parent, nil
+}
+
 func defaultServer(spec *openapi3.T) string {
 	if len(spec.Servers) == 0 {
 		return ""
@@ -134,7 +201,6 @@ func New(name string, spec *openapi3.T, builders map[string]Builder) (*cobra.Com
 	flags.StringVar(&options.responseHeader, "response-header", "", "Print one response header instead of the body, e.g. ETag")
 	flags.Int64Var(&options.maxInput, "max-input-bytes", options.maxInput, "Maximum request body size")
 	flags.Int64Var(&options.maxOutput, "max-output-bytes", options.maxOutput, "Maximum response body size")
-	groups := map[string]*cobra.Command{"": root}
 	paths := spec.Paths.Map()
 	pathNames := make([]string, 0, len(paths))
 	for path := range paths {
@@ -157,35 +223,23 @@ func New(name string, spec *openapi3.T, builders map[string]Builder) (*cobra.Com
 			if build == nil {
 				return nil, fmt.Errorf("missing generated request builder for %s", op.OperationID)
 			}
-			group := ""
-			if len(op.Tags) > 0 {
-				group = Kebab(op.Tags[0])
+			groups, err := commandGroups(op)
+			if err != nil {
+				return nil, err
 			}
-			group = extension(op.Extensions, "x-cli-group", group)
+			parent, err := commandParent(root, groups)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", op.OperationID, err)
+			}
 			leaf := extension(op.Extensions, "x-cli-name", Kebab(op.OperationID))
-			if leaf == "" || leaf != Kebab(leaf) || group != Kebab(group) {
+			if leaf == "" || leaf != Kebab(leaf) {
 				return nil, errors.New("CLI command names must be nonempty kebab-case names")
-			}
-			parent := groups[group]
-			if parent == nil {
-				if root.HasSubCommands() {
-					for _, existing := range root.Commands() {
-						if existing.Name() == group {
-							return nil, fmt.Errorf("CLI group collision: %s", group)
-						}
-					}
-				}
-				parent = &cobra.Command{Use: group, Short: "Operations tagged " + group}
-				root.AddCommand(parent)
-				groups[group] = parent
 			}
 			if leaf == "help" || leaf == "completion" {
 				return nil, fmt.Errorf("reserved command name: %s", leaf)
 			}
-			for _, existing := range parent.Commands() {
-				if existing.Name() == leaf {
-					return nil, fmt.Errorf("CLI command collision: %s %s", group, leaf)
-				}
+			if childCommand(parent, leaf) != nil {
+				return nil, fmt.Errorf("CLI command collision: %s %s", parent.CommandPath(), leaf)
 			}
 			command := &cobra.Command{Use: leaf, Short: op.Summary, Long: op.Description, Args: cobra.NoArgs}
 			if op.Deprecated {

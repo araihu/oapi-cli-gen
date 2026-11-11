@@ -83,6 +83,10 @@ actions:
     update:
       x-cli-name: get
       x-cli-group: secrets
+  - target: $.paths.*[?(@.operationId == 'listSecretVersions')]
+    update:
+      x-cli-name: list
+      x-cli-group: [secrets, versions]
 ```
 
 The producer applies the overlay to a self-contained YAML bundle, then uses
@@ -94,8 +98,14 @@ vacuum apply-overlay --fail-on-warnings openapi.bundle.yaml cli.overlay.yaml ope
 vacuum bundle --composed --format json openapi.cli.yaml openapi.cli.json
 ```
 
-This exposes `inventory secrets get`. The principal operation ID remains
-`getSecret`; without metadata, the default command remains `get-secret`.
+A string group exposes a single level, such as `inventory secrets get`. A
+list specifies each group in order, as in `inventory secrets versions list`.
+An empty string or list places the command at the root. Each segment must be
+a nonempty kebab-case name. Group names `help` and `completion` are reserved.
+Each parent can contain distinct leaf commands and child groups.
+
+The original operation IDs still identify the HTTP requests. With the
+`Secrets` tag, the default for `getSecret` is `inventory secrets get-secret`.
 `x-cli-flag` can rename a parameter flag, and `x-cli-ignore: true` can exclude
 an operation, through overlay actions targeting those elements. Names and
 collisions are checked; API-domain behavior belongs to the producer's metadata.

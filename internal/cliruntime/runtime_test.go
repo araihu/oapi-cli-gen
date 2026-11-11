@@ -109,6 +109,78 @@ func TestHelpAndValidationNeverSendRequests(t *testing.T) {
 	}
 }
 
+func TestNestedGroupCommands(t *testing.T) {
+	t.Setenv("DEMO_TOKEN", "test-bearer")
+	spec := document(t)
+	groups := []any{"items", "profiles", "images"}
+	spec.Paths.Find("/items/{id}").Get.Extensions = map[string]any{"x-cli-group": groups}
+	spec.Paths.Find("/items").Post.Extensions = map[string]any{"x-cli-group": groups}
+	spec.Paths.Find("/public").Get.Extensions = map[string]any{"x-cli-group": "items"}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		fmt.Fprintf(w, "%s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	out, _, err := runCommand(t, spec, server.URL, "", "items", "profiles", "images", "--help")
+	if err != nil || !strings.Contains(out, "demo items profiles images [command]") ||
+		!strings.Contains(out, "create") || !strings.Contains(out, "read") || requests.Load() != 0 {
+		t.Fatalf("nested help: %v, requests %d, output %q", err, requests.Load(), out)
+	}
+	for _, test := range []struct {
+		args []string
+		body string
+		want string
+	}{
+		{[]string{"items", "profiles", "images", "read", "--id", "1"}, "", "GET /items/1"},
+		{[]string{"items", "profiles", "images", "create", "--body-stdin"}, `{"name":"Milo"}`, "POST /items"},
+		{[]string{"items", "public"}, "", "GET /public"},
+	} {
+		args := append(test.args, "--output", "raw")
+		out, stderr, err := runCommand(t, spec, server.URL, test.body, args...)
+		if err != nil || stderr != "" || out != test.want {
+			t.Fatalf("%v: got %q, stderr %q, error %v", args, out, stderr, err)
+		}
+	}
+}
+
+func TestNestedGroupValidation(t *testing.T) {
+	unused := func(string, Input) (*http.Request, error) {
+		t.Fatal("constructing commands must not build HTTP requests")
+		return nil, nil
+	}
+	builders := map[string]Builder{"read": unused, "create": unused, "public": unused}
+	for _, test := range []struct {
+		name        string
+		group       any
+		leaf        string
+		secondGroup any
+		secondLeaf  string
+		want        string
+	}{
+		{"wrong type", true, "create", "items", "read", "expected a string or a list of strings"},
+		{"non-string segment", []any{"items", 42}, "create", "items", "read", "each path segment must be a string"},
+		{"empty segment", []any{"items", ""}, "create", "items", "read", "nonempty kebab-case"},
+		{"invalid segment", []any{"items", "invalid name"}, "create", "items", "read", "nonempty kebab-case"},
+		{"reserved group", []any{"items", "help"}, "create", "items", "read", "reserved CLI group name"},
+		{"duplicate leaf", []any{"items", "profiles"}, "read", []any{"items", "profiles"}, "read", "CLI command collision: demo items profiles read"},
+		{"leaf before group", "items", "profiles", []any{"items", "profiles"}, "read", "CLI group collision: demo items profiles"},
+		{"group before leaf", []any{"items", "profiles"}, "create", "items", "profiles", "CLI command collision: demo items profiles"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec := document(t)
+			spec.Paths.Find("/items").Post.Extensions = map[string]any{"x-cli-group": test.group, "x-cli-name": test.leaf}
+			spec.Paths.Find("/items/{id}").Get.Extensions = map[string]any{"x-cli-group": test.secondGroup, "x-cli-name": test.secondLeaf}
+			_, err := New("demo", spec, builders)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("got %v, want error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestBearerPublicTLSAndBody(t *testing.T) {
 	t.Setenv("DEMO_TOKEN", "private-bearer")
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
