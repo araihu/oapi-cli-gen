@@ -192,9 +192,9 @@ one Problem Details object on stderr and leave stdout empty. The HTTP status
 comes from the response. Standard type URIs, including relative references,
 are processed independently of `code`.
 
-For requests with input, authentication, a server path prefix, or a request
-Content-Type, server-supplied problem metadata is restricted to the declared
-short code. A schema's optional
+For requests with input, authentication (including proxy credentials), a
+server path prefix, or a request Content-Type, server-supplied problem
+metadata is restricted to the declared short code. A schema's optional
 `x-cli-problem-catalog` can provide trusted metadata for both output modes.
 Set `type-prefix`, `documentation-base`, and `titles` keyed by declared code.
 The CLI appends the code to the type prefix and uses it as the fragment of the

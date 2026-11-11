@@ -196,6 +196,46 @@ func TestGeneratedClientRunsSDKSerialization(t *testing.T) {
 	}
 }
 
+func TestGeneratedClientProtectsProxyCredentials(t *testing.T) {
+	_, binary := buildProject(t, petOptions(t))
+	const marker = "fixture-proxy-password"
+	expected := &http.Request{Header: make(http.Header)}
+	expected.SetBasicAuth("fixture", marker)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Proxy-Authorization") != expected.Header.Get("Authorization") {
+			t.Error("proxy did not receive the fixture credentials")
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"type":"urn:fixture:%s","title":"%s","documentation":"https://docs.example.com/%s"}`, marker, marker, marker)
+	}))
+	defer proxy.Close()
+	proxyURL := "http://fixture:" + marker + "@" + strings.TrimPrefix(proxy.URL, "http://")
+
+	for _, format := range []string{"table", "json"} {
+		t.Run(format, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), binary, "health", "--server", "http://service.invalid", "--allow-http", "--timeout", "2s", "--output", format)
+			cmd.Env = append(os.Environ(), "HTTP_PROXY="+proxyURL, "NO_PROXY=", "no_proxy=", "REQUEST_METHOD=")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 4 || stdout.Len() != 0 || strings.Contains(stderr.String(), marker) {
+				t.Fatalf("exit=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			if format == "json" {
+				var problem struct {
+					Type   string `json:"type"`
+					Status int    `json:"status"`
+				}
+				if err := json.Unmarshal(stderr.Bytes(), &problem); err != nil || problem.Type != "about:blank" || problem.Status != 503 {
+					t.Fatalf("unexpected JSON diagnostic: %s", stderr.String())
+				}
+			}
+		})
+	}
+}
+
 func TestDeterministicConcurrentGeneration(t *testing.T) {
 	options := petOptions(t)
 	expected := generated(t, options)

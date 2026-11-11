@@ -68,6 +68,16 @@ paths:
       security: []
       responses:
         '200': {description: Healthy}
+        '503':
+          description: Unavailable
+          content:
+            application/problem+json:
+              schema:
+                type: object
+                properties:
+                  type: {type: string}
+                  title: {type: string}
+                  documentation: {type: string, format: uri}
 components:
   securitySchemes:
     bearerAuth: {type: http, scheme: bearer}

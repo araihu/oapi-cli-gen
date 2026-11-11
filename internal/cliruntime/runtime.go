@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -427,6 +428,16 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 	if err != nil {
 		return usage(err.Error())
 	}
+	var proxyAuthenticated atomic.Bool
+	if selectProxy := transport.Proxy; selectProxy != nil {
+		transport.Proxy = func(request *http.Request) (*url.URL, error) {
+			proxy, err := selectProxy(request)
+			if proxy != nil && proxy.User != nil {
+				proxyAuthenticated.Store(true)
+			}
+			return proxy, err
+		}
+	}
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(req)
 	if err != nil {
@@ -438,7 +449,7 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 		// An error can reflect credentials or other values from the request.
 		serverPath := u.EscapedPath()
 		privateInput := len(input.Body) != 0 || input.ContentType != "" || len(input.Values) != 0 ||
-			authenticated || options.certFile != "" || (serverPath != "" && serverPath != "/")
+			authenticated || proxyAuthenticated.Load() || options.certFile != "" || (serverPath != "" && serverPath != "/")
 		return httpFailure(ctx, op, response, mediaType, options.format, options.maxOutput, privateInput)
 	}
 	if options.responseHeader != "" {
