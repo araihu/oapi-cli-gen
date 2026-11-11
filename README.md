@@ -79,6 +79,11 @@ info:
   title: Inventory CLI metadata
   version: 1.0.0
 actions:
+  - target: $
+    update:
+      x-cli-local-problem-documentation:
+        usage_error: https://docs.example.com/cli#usage_error
+        transport_error: https://docs.example.com/cli#transport_error
   - target: $.paths.*[?(@.operationId == 'getSecret')]
     update:
       x-cli-name: get
@@ -197,7 +202,9 @@ The `type` is `urn:cli:<name>:problem:<code>` and uses the generated CLI name.
 The object includes `title`, `detail`, `code`, and `exitCode`, and omits
 HTTP `status`. The codes are `usage_error` (Invalid command usage, exit 2)
 and `transport_error` (Transport error, exit 3), including timeouts and
-cancellation.
+cancellation. The optional root extension
+`x-cli-local-problem-documentation` maps a problem code to an HTTPS link.
+The generated CLI emits the link as `documentation` when configured.
 
 | Exit code | Meaning |
 | --- | --- |

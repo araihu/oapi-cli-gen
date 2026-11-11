@@ -2,6 +2,9 @@ openapi: 3.0.3
 info:
   title: Pets acceptance API
   version: 1.0.0
+x-cli-local-problem-documentation:
+  usage_error: https://docs.example.com/cli#usage_error
+  transport_error: https://docs.example.com/cli#transport_error
 servers:
   - url: https://example.invalid/base
 security:

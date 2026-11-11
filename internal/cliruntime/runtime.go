@@ -39,7 +39,7 @@ func ExitCode(err error) int {
 
 // Diagnostic formats local failures. HTTP failures already carry the selected
 // representation, including Problem Details in JSON mode.
-func Diagnostic(name string, root *cobra.Command, args []string, err error) string {
+func Diagnostic(name string, documentation map[string]string, root *cobra.Command, args []string, err error) string {
 	exitCode := ExitCode(err)
 	var code, title string
 	switch exitCode {
@@ -54,14 +54,16 @@ func Diagnostic(name string, root *cobra.Command, args []string, err error) stri
 		return err.Error()
 	}
 	diagnostic := struct {
-		Type     string `json:"type"`
-		Title    string `json:"title"`
-		Detail   string `json:"detail"`
-		Code     string `json:"code"`
-		ExitCode int    `json:"exitCode"`
+		Type          string `json:"type"`
+		Title         string `json:"title"`
+		Detail        string `json:"detail"`
+		Code          string `json:"code"`
+		ExitCode      int    `json:"exitCode"`
+		Documentation string `json:"documentation,omitempty"`
 	}{
-		Type:  "urn:cli:" + name + ":problem:" + code,
-		Title: title, Detail: err.Error(), Code: code, ExitCode: exitCode,
+		Documentation: documentation[code],
+		Type:          "urn:cli:" + name + ":problem:" + code,
+		Title:         title, Detail: err.Error(), Code: code, ExitCode: exitCode,
 	}
 	data, _ := json.MarshalIndent(diagnostic, "", "  ")
 	return string(data)
