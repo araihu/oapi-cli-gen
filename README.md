@@ -14,7 +14,7 @@ it does not merge overlays or infer short command names from resource names.
 
 ## Generate a CLI
 
-Go 1.27.3 or newer is required. `mise` selects Go 1.27.3.
+Go 1.27.3 or newer is required. Development and CI use Go 1.27.4.
 
 ```sh
 go install github.com/araihu/oapi-cli-gen/cmd/oapi-cli-gen@latest
@@ -79,10 +79,17 @@ info:
   title: Inventory CLI metadata
   version: 1.0.0
 actions:
+  - target: $
+    update:
+      x-cli-local-problem-documentation:
+        usage_error: https://docs.example.com/cli#usage_error
+        transport_error: https://docs.example.com/cli#transport_error
   - target: $.paths.*[?(@.operationId == 'getSecret')]
     update:
       x-cli-name: get
       x-cli-group: secrets
+      x-cli-description: Retrieve a secret by name.
+      x-cli-example: inventory secrets get --name demo
   - target: $.paths.*[?(@.operationId == 'listSecretVersions')]
     update:
       x-cli-name: list
@@ -103,6 +110,10 @@ list specifies each group in order, as in `inventory secrets versions list`.
 An empty string or list places the command at the root. Each segment must be
 a nonempty kebab-case name. Group names `help` and `completion` are reserved.
 Each parent can contain distinct leaf commands and child groups.
+
+Use `x-cli-description` to override the OpenAPI description in command help and
+`x-cli-example` to supply examples. Both accept strings, including YAML block
+scalars for multiline help.
 
 The original operation IDs still identify the HTTP requests. With the
 `Secrets` tag, the default for `getSecret` is `inventory secrets get-secret`.
@@ -169,17 +180,44 @@ characters; CSV preserves values with standard quoting, including embedded
 commas, quotes and newlines. Empty collections produce no table or CSV output.
 
 `--output json` pretty-prints the complete JSON response. `--output raw` streams
-raw bytes; `--response-header ETag` prints one header instead of any body format.
+raw bytes. Successful `text/event-stream` responses stream as raw bytes by
+default when the operation declares that media type. Use `--output raw` to
+read bytes from an undeclared stream explicitly.
+`--response-header ETag` prints one header instead of any body format.
 Empty responses and conditional HTTP 304 responses succeed without body output.
-Response data can contain secrets: stdout is intended for the caller's chosen
-destination. Credentials, request values and untrusted HTTP error bodies are
-not included in error diagnostics.
+For an `application/problem+json` response, the CLI can append a short `code`
+from the response schema's declared enum, for example
+`HTTP 409 Conflict (state_conflict)`. With `--output json`, HTTP failures emit
+one Problem Details object on stderr and leave stdout empty. The HTTP status
+comes from the response. Standard type URIs, including relative references,
+are processed independently of `code`.
+
+For requests with input, authentication (including proxy credentials), a
+server path prefix, or a request Content-Type, server-supplied problem
+metadata is restricted to the declared short code. A schema's optional
+`x-cli-problem-catalog` can provide trusted metadata for both output modes.
+Set `type-prefix`, `documentation-base`, and `titles` keyed by declared code.
+The CLI appends the code to the type prefix and uses it as the fragment of the
+documentation URL. For public requests without input, a declared
+`documentation` URI can supply a printable HTTPS link. Unrecognized
+responses use `about:blank` and the HTTP status title. A truncated problem
+body is a transport failure. An oversized problem body uses the HTTP
+fallback without copying response data.
+
+JSON mode writes usage and transport failures as Problem Details on stderr.
+The `type` is `urn:cli:<name>:problem:<code>` and uses the generated CLI name.
+The object includes `title`, `detail`, `code`, and `exitCode`, and omits
+HTTP `status`. The codes are `usage_error` (Invalid command usage, exit 2)
+and `transport_error` (Transport error, exit 3), including timeouts and
+cancellation. The optional root extension
+`x-cli-local-problem-documentation` maps a problem code to an HTTPS link.
+The generated CLI emits the link as `documentation` when configured.
 
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Successful HTTP result, including 304; or help/completion |
 | 2 | Invalid flags/input/schema, missing credentials, or configuration |
-| 3 | Transport/TLS/timeout/cancellation or response read/format/size failure |
+| 3 | Transport/TLS/timeout/cancellation or response read/format/size failure, or requested header absent |
 | 4 | Unsuccessful HTTP status, including an unfollowed redirect |
 
 Raw output may be partial if streaming fails or the response exceeds its bound;

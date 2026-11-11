@@ -2,6 +2,9 @@ openapi: 3.0.3
 info:
   title: Pets acceptance API
   version: 1.0.0
+x-cli-local-problem-documentation:
+  usage_error: https://docs.example.com/cli#usage_error
+  transport_error: https://docs.example.com/cli#transport_error
 servers:
   - url: https://example.invalid/base
 security:
@@ -65,6 +68,16 @@ paths:
       security: []
       responses:
         '200': {description: Healthy}
+        '503':
+          description: Unavailable
+          content:
+            application/problem+json:
+              schema:
+                type: object
+                properties:
+                  type: {type: string}
+                  title: {type: string}
+                  documentation: {type: string, format: uri}
 components:
   securitySchemes:
     bearerAuth: {type: http, scheme: bearer}

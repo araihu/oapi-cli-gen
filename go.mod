@@ -2,6 +2,8 @@ module github.com/araihu/oapi-cli-gen
 
 go 1.27.3
 
+toolchain go1.27.4
+
 require (
 	github.com/getkin/kin-openapi v0.152.0
 	github.com/oapi-codegen/oapi-codegen/v2 v2.8.1

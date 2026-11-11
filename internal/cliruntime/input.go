@@ -140,13 +140,15 @@ func parameterJSON(p *openapi3.Parameter, v *parameterValue, changed bool) (json
 	return raw, nil
 }
 
+var errBodyTooLarge = errors.New("input exceeds the configured byte limit")
+
 func boundedRead(r io.Reader, maximum int64) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maximum+1))
 	if err != nil {
 		return nil, errors.New("cannot read input")
 	}
 	if int64(len(data)) > maximum {
-		return nil, errors.New("input exceeds the configured byte limit")
+		return nil, errBodyTooLarge
 	}
 	return data, nil
 }

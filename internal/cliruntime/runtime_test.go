@@ -46,7 +46,11 @@ func runCommand(t *testing.T, spec *openapi3.T, server, body string, args ...str
 			if input.Body != nil {
 				method = "POST"
 			}
-			return http.NewRequest(method, strings.TrimRight(server, "/")+path, bytes.NewReader(input.Body))
+			req, err := http.NewRequest(method, strings.TrimRight(server, "/")+path, bytes.NewReader(input.Body))
+			if err == nil && input.ContentType != "" {
+				req.Header.Set("Content-Type", input.ContentType)
+			}
+			return req, err
 		}
 	}
 	root, err := New("demo", spec, map[string]Builder{"read": build("/items/1"), "create": build("/items"), "public": build("/public")})
@@ -76,6 +80,8 @@ func TestHelpAndValidationNeverSendRequests(t *testing.T) {
 		success    bool
 	}{
 		{"help", "", []string{"--help"}, true},
+		{"group help", "", []string{"items"}, true},
+		{"unknown subcommand", "", []string{"items", "typo"}, false},
 		{"output format", "", []string{"public", "--output", "invalid"}, false},
 		{"missing path", "", []string{"items", "read"}, false},
 		{"invalid integer", "", []string{"items", "read", "--id", "private-marker"}, false},
@@ -278,7 +284,7 @@ func TestAuthenticationAlternativesAndAND(t *testing.T) {
 	spec.Components.SecuritySchemes["basic"] = &openapi3.SecuritySchemeRef{Value: &openapi3.SecurityScheme{Type: "http", Scheme: "basic"}}
 	spec.Security = openapi3.SecurityRequirements{{"apiKey": {}, "bearerAuth": {}}}
 	req, _ := http.NewRequest("GET", "https://example.invalid", nil)
-	if err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", []string{"apiKey=SERVICE_KEY"}, false); err != nil {
+	if applied, err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", []string{"apiKey=SERVICE_KEY"}, false); err != nil || !applied {
 		t.Fatal(err)
 	}
 	if req.Header.Get("Authorization") != "Bearer bearer" || req.Header.Get("X-API-Key") != "api-key" {
@@ -286,7 +292,7 @@ func TestAuthenticationAlternativesAndAND(t *testing.T) {
 	}
 	spec.Security = openapi3.SecurityRequirements{{"basic": {}}}
 	req.Header = http.Header{}
-	if err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", []string{"basic=SERVICE_BASIC"}, false); err != nil {
+	if applied, err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", []string{"basic=SERVICE_BASIC"}, false); err != nil || !applied {
 		t.Fatal(err)
 	}
 	user, password, ok := req.BasicAuth()
@@ -295,7 +301,7 @@ func TestAuthenticationAlternativesAndAND(t *testing.T) {
 	}
 	spec.Security = openapi3.SecurityRequirements{{"apiKey": {}}, {"bearerAuth": {}}}
 	req.Header = http.Header{}
-	if err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", nil, false); err != nil || req.Header.Get("Authorization") != "Bearer bearer" {
+	if applied, err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", nil, false); err != nil || !applied || req.Header.Get("Authorization") != "Bearer bearer" {
 		t.Fatal("OR fallback failed")
 	}
 	if req.Header.Get("X-API-Key") != "" {
@@ -338,5 +344,350 @@ func TestIntegerPrecision(t *testing.T) {
 	var id int64
 	if err := input.Decode("path", "id", &id); err != nil || id != 9007199254740993 {
 		t.Fatalf("integer precision lost: %d %v", id, err)
+	}
+}
+
+func TestCommandHelpUsesOverlayText(t *testing.T) {
+	doc := document(t)
+	op := doc.Paths.Find("/public").Get
+	op.Description = "Contract implementation details."
+	op.Extensions = map[string]any{
+		"x-cli-description": "Show the public result.",
+		"x-cli-example":     "demo public --output json",
+	}
+	out, _, err := runCommand(t, doc, "", "", "public", "--help")
+	if err != nil || !strings.Contains(out, "Show the public result.") ||
+		!strings.Contains(out, "demo public --output json") || strings.Contains(out, op.Description) {
+		t.Fatalf("help = %q, err = %v", out, err)
+	}
+}
+
+func TestEventStreamDefaultsToRaw(t *testing.T) {
+	const frame = "id: 1\ndata: ready\n\n"
+	var hold atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		fmt.Fprint(w, frame)
+		w.(http.Flusher).Flush()
+		if hold.Load() {
+			<-r.Context().Done()
+		}
+	}))
+	defer server.Close()
+
+	doc := document(t)
+	out, _, err := runCommand(t, doc, server.URL, "", "public")
+	if err == nil || ExitCode(err) != 3 || out != "" {
+		t.Fatalf("undeclared stream output = %q, err = %v", out, err)
+	}
+	doc.Paths.Find("/public").Get.Responses.Status(200).Value.Content = openapi3.Content{
+		"text/event-stream": {},
+	}
+	out, _, err = runCommand(t, doc, server.URL, "", "public")
+	if err != nil || out != frame {
+		t.Fatalf("default output = %q, err = %v", out, err)
+	}
+	out, _, err = runCommand(t, doc, server.URL, "", "public", "--output", "table")
+	if err == nil || ExitCode(err) != 3 || out != "" {
+		t.Fatalf("explicit table output = %q, err = %v", out, err)
+	}
+	hold.Store(true)
+	out, _, err = runCommand(t, doc, server.URL, "", "public", "--timeout", "1s")
+	if err == nil || ExitCode(err) != 3 || err.Error() != "request timed out" || out != frame {
+		t.Fatalf("open stream output = %q, err = %v", out, err)
+	}
+}
+
+func TestHTTPProblemDisplaysOnlyDeclaredDiagnosticFields(t *testing.T) {
+	doc := document(t)
+	op := doc.Paths.Find("/public").Get
+	schema := openapi3.NewObjectSchema().WithProperty("code", openapi3.NewStringSchema().WithEnum("state_conflict", "idempotency_conflict", "unsafe\ncode"))
+	documentation := openapi3.NewStringSchema()
+	documentation.Format = "uri"
+	schema.WithProperty("documentation", documentation)
+	op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+		openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+	)})
+	const problemJSON = "application/problem+json; charset=utf-8"
+	for _, tc := range []struct {
+		name, media, body, suffix string
+		limits                    []string
+	}{
+		{"state conflict with documentation", problemJSON, `{"code":"state_conflict","detail":"secret","documentation":"https://docs.example.com/problems#state_conflict"}`,
+			" (state_conflict)\nDocumentation: https://docs.example.com/problems#state_conflict", nil},
+		{"wrong link type", problemJSON, `{"code":"state_conflict","documentation":123}`, " (state_conflict)", nil},
+		{"non-HTTPS link", problemJSON, `{"code":"state_conflict","documentation":"http://docs.example.com/problems"}`, " (state_conflict)", nil},
+		{"relative link", problemJSON, `{"code":"state_conflict","documentation":"/problems"}`, " (state_conflict)", nil},
+		{"link credentials", problemJSON, `{"code":"state_conflict","documentation":"https://user:secret@docs.example.com/problems"}`, " (state_conflict)", nil},
+		{"link query", problemJSON, `{"code":"state_conflict","documentation":"https://docs.example.com/problems?token=secret"}`, " (state_conflict)", nil},
+		{"link control character", problemJSON, `{"code":"state_conflict","documentation":"https://docs.example.com/problems#\u001b[0m"}`, " (state_conflict)", nil},
+		{"idempotency conflict", problemJSON, `{"code":"idempotency_conflict"}`, " (idempotency_conflict)", nil},
+		{"other media", "application/json", `{"code":"state_conflict"}`, "", nil},
+		{"undeclared code", problemJSON, `{"code":"secret"}`, "", nil},
+		{"control character", problemJSON, `{"code":"unsafe\ncode"}`, "", nil},
+		{"malformed body", problemJSON, `{"code":"state_conflict"`, "", nil},
+		{"oversize body", problemJSON, `{"code":"state_conflict"}`, "", []string{"--max-output-bytes", "8"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.media)
+				w.WriteHeader(http.StatusConflict)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+			out, _, err := runCommand(t, doc, server.URL, "", append([]string{"public"}, tc.limits...)...)
+			if err == nil || ExitCode(err) != 4 || err.Error() != "HTTP 409 Conflict"+tc.suffix || out != "" {
+				t.Fatalf("stdout = %q, err = %v", out, err)
+			}
+		})
+	}
+}
+
+func TestHTTPProblemOmitsDocumentationOutsideContract(t *testing.T) {
+	doc := document(t)
+	op := doc.Paths.Find("/public").Get
+	schema := openapi3.NewObjectSchema().WithProperty("code", openapi3.NewStringSchema().WithEnum("state_conflict"))
+	op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+		openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+	)})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"code":"state_conflict","documentation":"https://docs.example.com/problems"}`)
+	}))
+	defer server.Close()
+	out, _, err := runCommand(t, doc, server.URL, "", "public")
+	if err == nil || ExitCode(err) != 4 || err.Error() != "HTTP 409 Conflict (state_conflict)" || out != "" {
+		t.Fatalf("stdout = %q, err = %v", out, err)
+	}
+}
+
+func TestHTTPFailureJSON(t *testing.T) {
+	doc := document(t)
+	op := doc.Paths.Find("/public").Get
+	link := openapi3.NewStringSchema()
+	link.Format = "uri"
+	schema := openapi3.NewObjectSchema().
+		WithProperty("code", openapi3.NewStringSchema().WithEnum("state_conflict")).
+		WithProperty("type", openapi3.NewStringSchema()).
+		WithProperty("title", openapi3.NewStringSchema()).
+		WithProperty("documentation", link)
+	op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+		openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+	)})
+	const problemJSON = "application/problem+json"
+	for _, tc := range []struct {
+		name, media, body, problemType, title, code, documentation string
+	}{
+		{
+			"declared problem", problemJSON,
+			`{"type":"urn:example:state-conflict","title":"State conflict","status":400,"code":"state_conflict","documentation":"https://docs.example.com/state","detail":"private","currentMessage":{"text":"private"}}`,
+			"urn:example:state-conflict", "State conflict", "state_conflict", "https://docs.example.com/state",
+		},
+		{"standard problem", problemJSON, `{"type":"urn:example:standard","title":"Standard problem"}`, "urn:example:standard", "Standard problem", "", ""},
+		{"relative type", problemJSON, `{"type":"/problems/conflict","title":"Relative problem"}`, "/problems/conflict", "Relative problem", "", ""},
+		{"HTML response", "text/html", "<p>private</p>", "about:blank", "Conflict", "", ""},
+		{"invalid JSON", problemJSON, "{", "about:blank", "Conflict", "", ""},
+		{"undeclared code", problemJSON, `{"code":"private","title":"private"}`, "about:blank", "Conflict", "", ""},
+		{"invalid optional fields", problemJSON, `{"type":123,"title":{},"code":"state_conflict","documentation":"https://docs.example.com/?token=private"}`, "about:blank", "Conflict", "state_conflict", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.media)
+				w.WriteHeader(http.StatusConflict)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+
+			if tc.name == "standard problem" {
+				code := schema.Properties["code"]
+				delete(schema.Properties, "code")
+				defer func() { schema.Properties["code"] = code }()
+			}
+			out, _, err := runCommand(t, doc, server.URL, "", "public", "--output", "json")
+			if out != "" || err == nil || ExitCode(err) != 4 {
+				t.Fatalf("stdout = %q, err = %v", out, err)
+			}
+			var got httpProblem
+			if err := json.Unmarshal([]byte(err.Error()), &got); err != nil {
+				t.Fatal(err)
+			}
+			want := httpProblem{Type: tc.problemType, Title: tc.title, Status: 409, Code: tc.code, Documentation: tc.documentation}
+			if strings.HasPrefix(want.Type, "/") {
+				want.Type = server.URL + want.Type
+			}
+			if got != want || strings.Contains(err.Error(), "private") {
+				t.Fatalf("diagnostic = %s, want %+v", err, want)
+			}
+		})
+	}
+}
+
+func TestHTTPProblemCatalogKeepsRequestDataOutOfDiagnostics(t *testing.T) {
+	t.Setenv("DEMO_TOKEN", "fixture-private-token")
+	doc := document(t)
+	op := doc.Paths.Find("/items").Post
+	schema := openapi3.NewObjectSchema().WithProperty("code", openapi3.NewStringSchema().WithEnum("state_conflict"))
+	link := openapi3.NewStringSchema()
+	link.Format = "uri"
+	schema.WithProperty("documentation", link)
+	op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+		openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+	)})
+	const marker = "fixture-private-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+marker {
+			t.Error("fixture did not receive the credential")
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(w, `{"type":"urn:example:%s","title":"%s","code":"state_conflict","documentation":"https://docs.example.com/%s"}`, marker, marker, marker)
+	}))
+	defer server.Close()
+	for _, catalog := range []bool{false, true} {
+		if catalog {
+			schema.Extensions = map[string]any{"x-cli-problem-catalog": map[string]any{
+				"type-prefix": "urn:example:problem:", "documentation-base": "https://docs.example.com/catalog",
+				"titles": map[string]any{"state_conflict": "State conflict"},
+			}}
+		}
+		for _, format := range []string{"table", "json"} {
+			out, _, err := runCommand(t, doc, server.URL, `{"name":"fixture-private-token"}`, "items", "create", "--body-stdin", "--output", format)
+			if err == nil || ExitCode(err) != 4 || out != "" || strings.Contains(err.Error(), marker) ||
+				strings.Contains(err.Error(), "https://docs.example.com/catalog#state_conflict") != catalog {
+				t.Fatalf("catalog=%t format=%s stdout=%q err=%v", catalog, format, out, err)
+			}
+		}
+	}
+}
+
+func TestHTTPProblemKeepsServerPrefixAndEmptyBodyContentTypeOutOfDiagnostics(t *testing.T) {
+	doc := document(t)
+	public := doc.Paths.Find("/public").Get
+	create := doc.Paths.Find("/items").Post
+	create.Security = &openapi3.SecurityRequirements{}
+	create.RequestBody.Value.Content["application/octet-stream"] = &openapi3.MediaType{}
+	link := openapi3.NewStringSchema()
+	link.Format = "uri"
+	schema := openapi3.NewObjectSchema().WithProperty("documentation", link)
+	for _, op := range []*openapi3.Operation{public, create} {
+		op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+			openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+		)})
+	}
+
+	const marker = "fixture-private-value"
+	const mediaType = "application/octet-stream; review=" + marker
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + marker + "/public":
+			if r.Method != http.MethodGet {
+				t.Error("expected a GET with the supplied server prefix")
+			}
+		case "/items":
+			if r.Method != http.MethodPost || r.Header.Get("Content-Type") != mediaType || r.ContentLength != 0 {
+				t.Error("expected an empty request body with the supplied content type")
+			}
+		default:
+			t.Errorf("unexpected request path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(w, `{"type":"?echo=%s","title":"%s","documentation":"https://docs.example.com/%s"}`, marker, marker, marker)
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		name, server string
+		args         []string
+	}{
+		{"server prefix", server.URL + "/" + marker, []string{"public"}},
+		{"empty body content type", server.URL, []string{"items", "create", "--body-stdin", "--content-type", mediaType}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, format := range []string{"table", "json"} {
+				args := append(append([]string{}, tc.args...), "--output", format)
+				out, _, err := runCommand(t, doc, tc.server, "", args...)
+				if err == nil || ExitCode(err) != 4 || out != "" || strings.Contains(err.Error(), marker) {
+					t.Fatalf("format=%s stdout=%q err=%v", format, out, err)
+				}
+				if format == "json" {
+					var problem httpProblem
+					if decodeErr := json.Unmarshal([]byte(err.Error()), &problem); decodeErr != nil ||
+						problem.Type != "about:blank" || problem.Title != "Conflict" || problem.Documentation != "" {
+						t.Fatalf("unsafe JSON diagnostic: %s", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestTruncatedHTTPProblemBodyIsTransportFailure(t *testing.T) {
+	doc := document(t)
+	doc.Paths.Find("/public").Get.Responses.Set("503", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Unavailable").WithContent(
+		openapi3.Content{"application/problem+json": {}},
+	)})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.Header().Set("Content-Length", "200")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"type":"urn:example:truncated","title":"Fixture error"}`)
+	}))
+	defer server.Close()
+	out, _, err := runCommand(t, doc, server.URL, "", "public", "--output", "json")
+	if err == nil || ExitCode(err) != 3 || err.Error() != "cannot read error response" || out != "" {
+		t.Fatalf("stdout = %q, err = %v", out, err)
+	}
+}
+
+func TestHTTPProblemBodyDeadlineIsTransportFailure(t *testing.T) {
+	doc := document(t)
+	doc.Paths.Find("/public").Get.Responses.Set("503", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Unavailable").WithContent(
+		openapi3.Content{"application/problem+json": {}},
+	)})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	out, _, err := runCommand(t, doc, server.URL, "", "public", "--output", "json", "--timeout", "250ms")
+	if err == nil || ExitCode(err) != 3 || err.Error() != "request timed out" || out != "" {
+		t.Fatalf("stdout = %q, err = %v", out, err)
+	}
+}
+
+func TestDeprecatedOperationAndMissingHeaderKeepJSONDiagnosticsClean(t *testing.T) {
+	doc := document(t)
+	doc.Paths.Find("/public").Get.Deprecated = true
+	var failHTTP atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if failHTTP.Load() {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+	for _, tc := range []struct {
+		args     []string
+		exitCode int
+	}{
+		{[]string{"public", "--output", "json", "--unknown"}, 2},
+		{[]string{"public", "--output", "json", "--response-header", "ETag"}, 3},
+		{[]string{"public", "--output", "json"}, 4},
+	} {
+		failHTTP.Store(tc.exitCode == 4)
+		out, stderr, err := runCommand(t, doc, server.URL, "", tc.args...)
+		if err == nil || ExitCode(err) != tc.exitCode || out != "" || stderr != "" {
+			t.Fatalf("args=%v stdout=%q stderr=%q err=%v", tc.args, out, stderr, err)
+		}
+	}
+	failHTTP.Store(false)
+	out, stderr, err := runCommand(t, doc, server.URL, "", "public")
+	if err != nil || !strings.Contains(stderr, "deprecated") || out == "" {
+		t.Fatalf("text invocation stdout=%q stderr=%q err=%v", out, stderr, err)
 	}
 }

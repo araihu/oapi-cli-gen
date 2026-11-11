@@ -13,6 +13,7 @@ import (
 	"go/parser"
 	"go/token"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -49,6 +50,28 @@ type Result struct {
 var codegenMu sync.Mutex
 var commandName = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 
+func localProblemDocumentation(extensions map[string]any) (map[string]string, error) {
+	const key = "x-cli-local-problem-documentation"
+	raw, exists := extensions[key]
+	if !exists {
+		return nil, nil
+	}
+	entries, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an object keyed by problem code", key)
+	}
+	links := make(map[string]string, len(entries))
+	for code, entry := range entries {
+		link, _ := entry.(string)
+		u, err := url.Parse(link)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
+			return nil, fmt.Errorf("%s entry %q must be an absolute HTTPS URL without userinfo", key, code)
+		}
+		links[code] = link
+	}
+	return links, nil
+}
+
 // Generate loads local references, validates the contract, and generates source.
 // It never runs a shell, invokes Go or fetches remote OpenAPI documents.
 func Generate(ctx context.Context, options Options) (*Result, error) {
@@ -59,6 +82,10 @@ func Generate(ctx context.Context, options Options) (*Result, error) {
 		return nil, fmt.Errorf("invalid generated module path: %w", err)
 	}
 	doc, err := loadSpec(ctx, options.Spec)
+	if err != nil {
+		return nil, err
+	}
+	documentation, err := localProblemDocumentation(doc.Extensions)
 	if err != nil {
 		return nil, err
 	}
@@ -157,9 +184,13 @@ func main() {
  defer cancel()
  root, err := cli.New()
  if err == nil { err = root.ExecuteContext(ctx) }
- if err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(cliruntime.ExitCode(err)) }
+ if err != nil {
+  documentation := %#v
+  fmt.Fprintln(os.Stderr, cliruntime.Diagnostic(%q, documentation, root, os.Args[1:], err))
+  os.Exit(cliruntime.ExitCode(err))
+ }
 }
-`, options.Module+"/internal/cli", options.Module+"/internal/cliruntime")
+`, options.Module+"/internal/cli", options.Module+"/internal/cliruntime", documentation, options.Name)
 	files["cmd/"+options.Name+"/main.go"] = []byte(mainSource)
 	for name, data := range files {
 		formatted, err := format.Source(data)

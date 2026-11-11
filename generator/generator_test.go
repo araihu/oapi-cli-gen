@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -147,6 +148,91 @@ func TestGeneratedClientRunsSDKSerialization(t *testing.T) {
 	}
 	if calls.Load() != before {
 		t.Fatal("invalid input reached the server")
+	}
+
+	server.Close()
+	for _, tc := range []struct {
+		name, code string
+		exitCode   int
+		args       []string
+	}{
+		{"required flag", "usage_error", 2, []string{"pets", "get", "--output", "json"}},
+		{"unknown command", "usage_error", 2, []string{"unknown", "--output=json"}},
+		{"invalid flag before output", "usage_error", 2, []string{"health", "--timeout=invalid", "--output", "json"}},
+		{"unknown flag before output", "usage_error", 2, []string{"health", "--unknown", "--output=json"}},
+		{"last output wins", "usage_error", 2, []string{"health", "--output=table", "--timeout=invalid", "--output=json"}},
+		{"connection refused", "transport_error", 3, []string{"health", "--output=json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, stderr, err := run("", tc.args...)
+			var exit *exec.ExitError
+			var got struct {
+				Type          string          `json:"type"`
+				Title         string          `json:"title"`
+				Detail        string          `json:"detail"`
+				Code          string          `json:"code"`
+				ExitCode      int             `json:"exitCode"`
+				Status        json.RawMessage `json:"status"`
+				Documentation string          `json:"documentation"`
+			}
+			if !errors.As(err, &exit) || exit.ExitCode() != tc.exitCode || out != "" ||
+				json.Unmarshal([]byte(stderr), &got) != nil || got.Code != tc.code ||
+				got.Type != "urn:cli:pets:problem:"+tc.code || got.Title == "" ||
+				got.Detail == "" || got.ExitCode != tc.exitCode || got.Status != nil ||
+				got.Documentation != "https://docs.example.com/cli#"+tc.code {
+				t.Fatalf("exit=%v stdout=%q stderr=%q", err, out, stderr)
+			}
+		})
+	}
+	for _, args := range [][]string{
+		{"health", "--", "--output", "json"},
+		{"health", "--server", "--output", "json"},
+		{"health", "--output=json", "--timeout=invalid", "--output=table"},
+	} {
+		out, stderr, err := run("", args...)
+		if err == nil || out != "" || stderr == "" || json.Valid([]byte(stderr)) {
+			t.Fatalf("args=%v exit=%v stdout=%q stderr=%q", args, err, out, stderr)
+		}
+	}
+}
+
+func TestGeneratedClientProtectsProxyCredentials(t *testing.T) {
+	_, binary := buildProject(t, petOptions(t))
+	const marker = "fixture-proxy-password"
+	expected := &http.Request{Header: make(http.Header)}
+	expected.SetBasicAuth("fixture", marker)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Proxy-Authorization") != expected.Header.Get("Authorization") {
+			t.Error("proxy did not receive the fixture credentials")
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, `{"type":"urn:fixture:%s","title":"%s","documentation":"https://docs.example.com/%s"}`, marker, marker, marker)
+	}))
+	defer proxy.Close()
+	proxyURL := "http://fixture:" + marker + "@" + strings.TrimPrefix(proxy.URL, "http://")
+
+	for _, format := range []string{"table", "json"} {
+		t.Run(format, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), binary, "health", "--server", "http://service.invalid", "--allow-http", "--timeout", "2s", "--output", format)
+			cmd.Env = append(os.Environ(), "HTTP_PROXY="+proxyURL, "NO_PROXY=", "no_proxy=", "REQUEST_METHOD=")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 4 || stdout.Len() != 0 || strings.Contains(stderr.String(), marker) {
+				t.Fatalf("exit=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			if format == "json" {
+				var problem struct {
+					Type   string `json:"type"`
+					Status int    `json:"status"`
+				}
+				if err := json.Unmarshal(stderr.Bytes(), &problem); err != nil || problem.Type != "about:blank" || problem.Status != 503 {
+					t.Fatalf("unexpected JSON diagnostic: %s", stderr.String())
+				}
+			}
+		})
 	}
 }
 
