@@ -187,6 +187,11 @@ short `code` from the response schema’s declared enum, for example
 userinfo or a query string, the CLI prints it on the next stderr line. The
 CLI does not open the link or print the rest of the error body.
 
+With `--output json`, HTTP failures emit one Problem Details object on stderr
+and leave stdout empty. The diagnostic includes the HTTP status and validated
+problem metadata. For an unrecognized response, it uses `about:blank` and
+the HTTP status title. HTTP failures still exit with code 4.
+
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Successful HTTP result, including 304; or help/completion |

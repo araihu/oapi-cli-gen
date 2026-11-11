@@ -449,3 +449,54 @@ func TestHTTPProblemOmitsDocumentationOutsideContract(t *testing.T) {
 		t.Fatalf("stdout = %q, err = %v", out, err)
 	}
 }
+
+func TestHTTPFailureJSON(t *testing.T) {
+	doc := document(t)
+	op := doc.Paths.Find("/public").Get
+	link := openapi3.NewStringSchema()
+	link.Format = "uri"
+	schema := openapi3.NewObjectSchema().
+		WithProperty("code", openapi3.NewStringSchema().WithEnum("state_conflict")).
+		WithProperty("type", openapi3.NewStringSchema()).
+		WithProperty("title", openapi3.NewStringSchema()).
+		WithProperty("documentation", link)
+	op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+		openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+	)})
+	const problemJSON = "application/problem+json"
+	for _, tc := range []struct {
+		name, media, body, problemType, title, code, documentation string
+	}{
+		{
+			"declared problem", problemJSON,
+			`{"type":"urn:example:state-conflict","title":"State conflict","status":400,"code":"state_conflict","documentation":"https://docs.example.com/state","detail":"private","currentMessage":{"text":"private"}}`,
+			"urn:example:state-conflict", "State conflict", "state_conflict", "https://docs.example.com/state",
+		},
+		{"HTML response", "text/html", "<p>private</p>", "about:blank", "Conflict", "", ""},
+		{"invalid JSON", problemJSON, "{", "about:blank", "Conflict", "", ""},
+		{"undeclared code", problemJSON, `{"code":"private","title":"private"}`, "about:blank", "Conflict", "", ""},
+		{"invalid optional fields", problemJSON, `{"type":123,"title":{},"code":"state_conflict","documentation":"https://docs.example.com/?token=private"}`, "about:blank", "Conflict", "state_conflict", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.media)
+				w.WriteHeader(http.StatusConflict)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+
+			out, _, err := runCommand(t, doc, server.URL, "", "public", "--output", "json")
+			if out != "" || err == nil || ExitCode(err) != 4 {
+				t.Fatalf("stdout = %q, err = %v", out, err)
+			}
+			var got httpProblem
+			if err := json.Unmarshal([]byte(err.Error()), &got); err != nil {
+				t.Fatal(err)
+			}
+			want := httpProblem{Type: tc.problemType, Title: tc.title, Status: 409, Code: tc.code, Documentation: tc.documentation}
+			if got != want || strings.Contains(err.Error(), "private") {
+				t.Fatalf("diagnostic = %s, want %+v", err, want)
+			}
+		})
+	}
+}

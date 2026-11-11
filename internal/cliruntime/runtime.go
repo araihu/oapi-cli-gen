@@ -362,7 +362,7 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 	defer response.Body.Close()
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if (response.StatusCode < 200 || response.StatusCode >= 300) && response.StatusCode != 304 {
-		return httpFailure(op, response, mediaType, options.maxOutput)
+		return httpFailure(op, response, mediaType, options.format, options.maxOutput)
 	}
 	if options.responseHeader != "" {
 		value := response.Header.Get(options.responseHeader)
@@ -411,69 +411,109 @@ func transportError(ctx context.Context, message string) error {
 	return &ExitError{3, message}
 }
 
-func httpFailure(op *openapi3.Operation, response *http.Response, mediaType string, maxOutput int64) error {
+type httpProblem struct {
+	Type          string `json:"type"`
+	Title         string `json:"title,omitempty"`
+	Status        int    `json:"status"`
+	Code          string `json:"code,omitempty"`
+	Documentation string `json:"documentation,omitempty"`
+}
+
+func httpFailure(op *openapi3.Operation, response *http.Response, mediaType, format string, maxOutput int64) error {
+	problem := readHTTPProblem(op, response, mediaType, maxOutput)
+	if format == "json" {
+		// httpProblem contains only strings and an integer.
+		data, _ := json.MarshalIndent(problem, "", "  ")
+		return &ExitError{4, string(data)}
+	}
+	message := fmt.Sprintf("HTTP %d %s", problem.Status, http.StatusText(problem.Status))
+	if problem.Code != "" {
+		message += " (" + problem.Code + ")"
+	}
+	if problem.Documentation != "" {
+		message += "\nDocumentation: " + problem.Documentation
+	}
+	return &ExitError{4, message}
+}
+
+func readHTTPProblem(op *openapi3.Operation, response *http.Response, mediaType string, maxOutput int64) httpProblem {
 	status := response.StatusCode
-	failure := &ExitError{4, fmt.Sprintf("HTTP %d %s", status, http.StatusText(status))}
+	problem := httpProblem{Type: "about:blank", Title: http.StatusText(status), Status: status}
 	if mediaType != "application/problem+json" || op.Responses == nil {
-		return failure
+		return problem
 	}
 	contract := op.Responses.Status(status)
 	if contract == nil {
 		contract = op.Responses.Default()
 	}
 	if contract == nil || contract.Value == nil {
-		return failure
+		return problem
 	}
 	media := contract.Value.Content[mediaType]
 	if media == nil || media.Schema == nil || media.Schema.Value == nil {
-		return failure
+		return problem
 	}
 	properties := media.Schema.Value.Properties
 	code := properties["code"]
 	if code == nil || code.Value == nil || len(code.Value.Enum) == 0 {
-		return failure
+		return problem
 	}
-	// Display only the declared code and documentation link from the error body.
 	data, err := boundedRead(response.Body, min(maxOutput, 1<<20))
 	if err != nil {
-		return failure
+		return problem
 	}
-	var problem struct {
+	var body struct {
+		Type          json.RawMessage `json:"type"`
+		Title         json.RawMessage `json:"title"`
 		Code          string          `json:"code"`
 		Documentation json.RawMessage `json:"documentation"`
 	}
-	if json.Unmarshal(data, &problem) != nil || problem.Code == "" || len(problem.Code) > 64 ||
-		strings.IndexFunc(problem.Code, func(r rune) bool {
+	if json.Unmarshal(data, &body) != nil || body.Code == "" || len(body.Code) > 64 ||
+		strings.IndexFunc(body.Code, func(r rune) bool {
 			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.')
 		}) >= 0 {
-		return failure
+		return problem
 	}
-	for _, value := range code.Value.Enum {
-		if allowed, ok := value.(string); ok && allowed == problem.Code {
-			failure.Message += " (" + problem.Code + ")"
-			documentation := properties["documentation"]
-			if documentation != nil && documentation.Value != nil && documentation.Value.Format == "uri" {
-				if link := problemDocumentation(problem.Documentation); link != "" {
-					failure.Message += "\nDocumentation: " + link
-				}
-			}
-			break
+	if !slices.ContainsFunc(code.Value.Enum, func(value any) bool { allowed, ok := value.(string); return ok && allowed == body.Code }) {
+		return problem
+	}
+	problem.Code = body.Code
+	if documentation := properties["documentation"]; documentation != nil && documentation.Value != nil && documentation.Value.Format == "uri" {
+		problem.Documentation = problemDocumentation(body.Documentation)
+	}
+	if ref := properties["type"]; ref != nil && ref.Value != nil && ref.Value.Type.Is("string") {
+		if _, value := problemURI(body.Type); value != "" {
+			problem.Type = value
 		}
 	}
-	return failure
+	if ref := properties["title"]; problem.Type != "about:blank" && ref != nil && ref.Value != nil && ref.Value.Type.Is("string") {
+		var title string
+		if json.Unmarshal(body.Title, &title) == nil && title != "" && len(title) <= 160 && strings.IndexFunc(title, func(r rune) bool { return !unicode.IsPrint(r) }) < 0 {
+			problem.Title = title
+		}
+	}
+	return problem
 }
 
 // A problem link is printed for the user to inspect. Reject terminal controls
 // and URL fields commonly used for credentials before rendering it.
 func problemDocumentation(raw json.RawMessage) string {
-	var link string
-	if json.Unmarshal(raw, &link) != nil || len(link) > 2048 ||
-		strings.IndexFunc(link, func(r rune) bool { return r < '!' || r > '~' }) >= 0 {
+	u, value := problemURI(raw)
+	if u == nil || u.Scheme != "https" || u.Hostname() == "" {
 		return ""
 	}
-	u, err := url.Parse(link)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery {
-		return ""
+	return value
+}
+
+func problemURI(raw json.RawMessage) (*url.URL, string) {
+	var value string
+	if json.Unmarshal(raw, &value) != nil || len(value) > 2048 ||
+		strings.IndexFunc(value, func(r rune) bool { return r < '!' || r > '~' }) >= 0 {
+		return nil, ""
 	}
-	return link
+	u, err := url.Parse(value)
+	if err != nil || !u.IsAbs() || u.User != nil || u.RawQuery != "" || u.ForceQuery {
+		return nil, ""
+	}
+	return u, value
 }
