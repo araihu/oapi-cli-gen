@@ -320,7 +320,8 @@ func New(name string, spec *openapi3.T, builders map[string]Builder) (*cobra.Com
 				Example: extension(op.Extensions, "x-cli-example", ""),
 			}
 			if op.Deprecated {
-				command.Deprecated = "deprecated by the OpenAPI contract"
+				command.Hidden = true
+				command.Long = strings.TrimSpace(command.Long + "\n\nDeprecated by the OpenAPI contract.")
 			}
 			parameters := Parameters(item, op)
 			flagNames := map[string]int{}
@@ -362,6 +363,9 @@ func New(name string, spec *openapi3.T, builders map[string]Builder) (*cobra.Com
 				}
 			}
 			command.RunE = func(cmd *cobra.Command, _ []string) error {
+				if op.Deprecated && options.format != "json" {
+					cmd.PrintErrf("Command %q is deprecated by the OpenAPI contract.\n", cmd.Name())
+				}
 				input := Input{Values: map[string]json.RawMessage{}}
 				for _, p := range parameters {
 					key := p.In + ":" + p.Name
@@ -419,7 +423,8 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 	ctx, cancel := context.WithTimeout(cmd.Context(), options.timeout)
 	defer cancel()
 	req = req.WithContext(ctx)
-	if err := authenticate(req, spec, op, prefix, options.authEnv, options.certFile != ""); err != nil {
+	authenticated, err := authenticate(req, spec, op, prefix, options.authEnv, options.certFile != "")
+	if err != nil {
 		return usage(err.Error())
 	}
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -430,18 +435,25 @@ func execute(cmd *cobra.Command, spec *openapi3.T, op *openapi3.Operation, prefi
 	defer response.Body.Close()
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if (response.StatusCode < 200 || response.StatusCode >= 300) && response.StatusCode != 304 {
-		return httpFailure(op, response, mediaType, options.format, options.maxOutput)
+		// An error can reflect credentials or other values from the request.
+		privateInput := len(input.Body) != 0 || len(input.Values) != 0 || authenticated || options.certFile != ""
+		return httpFailure(ctx, op, response, mediaType, options.format, options.maxOutput, privateInput)
 	}
 	if options.responseHeader != "" {
-		value := response.Header.Get(options.responseHeader)
-		if value == "" {
-			return &ExitError{4, "response header is absent"}
+		values := response.Header.Values(options.responseHeader)
+		if len(values) == 0 {
+			return &ExitError{3, "response header is absent"}
 		}
-		_, err = fmt.Fprintln(cmd.OutOrStdout(), value)
-		return err
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), values[0]); err != nil {
+			return &ExitError{3, "cannot write response header"}
+		}
+		return nil
 	}
 	format := options.format
 	if mediaType == "text/event-stream" && !cmd.Flags().Changed("output") {
+		if responseMedia(op, response.StatusCode, mediaType) == nil {
+			return &ExitError{3, "operation does not declare an event stream; use --output raw"}
+		}
 		format = "raw"
 	}
 	if format == "raw" {
@@ -487,10 +499,12 @@ type httpProblem struct {
 	Documentation string `json:"documentation,omitempty"`
 }
 
-func httpFailure(op *openapi3.Operation, response *http.Response, mediaType, format string, maxOutput int64) error {
-	problem := readHTTPProblem(op, response, mediaType, maxOutput)
+func httpFailure(ctx context.Context, op *openapi3.Operation, response *http.Response, mediaType, format string, maxOutput int64, privateInput bool) error {
+	problem, err := readHTTPProblem(op, response, mediaType, maxOutput, privateInput)
+	if err != nil && ctx.Err() != nil {
+		return transportError(ctx, "cannot read error response")
+	}
 	if format == "json" {
-		// httpProblem contains only strings and an integer.
 		data, _ := json.MarshalIndent(problem, "", "  ")
 		return &ExitError{4, string(data)}
 	}
@@ -504,70 +518,106 @@ func httpFailure(op *openapi3.Operation, response *http.Response, mediaType, for
 	return &ExitError{4, message}
 }
 
-func readHTTPProblem(op *openapi3.Operation, response *http.Response, mediaType string, maxOutput int64) httpProblem {
-	status := response.StatusCode
-	problem := httpProblem{Type: "about:blank", Title: http.StatusText(status), Status: status}
-	if mediaType != "application/problem+json" || op.Responses == nil {
-		return problem
+func responseMedia(op *openapi3.Operation, status int, mediaType string) *openapi3.MediaType {
+	if op.Responses == nil {
+		return nil
 	}
 	contract := op.Responses.Status(status)
 	if contract == nil {
 		contract = op.Responses.Default()
 	}
 	if contract == nil || contract.Value == nil {
-		return problem
+		return nil
 	}
-	media := contract.Value.Content[mediaType]
-	if media == nil || media.Schema == nil || media.Schema.Value == nil {
-		return problem
+	return contract.Value.Content[mediaType]
+}
+
+func readHTTPProblem(op *openapi3.Operation, response *http.Response, mediaType string, maxOutput int64, privateInput bool) (httpProblem, error) {
+	problem := httpProblem{Type: "about:blank", Title: http.StatusText(response.StatusCode), Status: response.StatusCode}
+	if mediaType != "application/problem+json" {
+		return problem, nil
 	}
-	properties := media.Schema.Value.Properties
-	code := properties["code"]
-	if code == nil || code.Value == nil || len(code.Value.Enum) == 0 {
-		return problem
+	media := responseMedia(op, response.StatusCode, mediaType)
+	if media == nil {
+		return problem, nil
 	}
 	data, err := boundedRead(response.Body, min(maxOutput, 1<<20))
 	if err != nil {
-		return problem
+		return problem, err
 	}
 	var body struct {
 		Type          json.RawMessage `json:"type"`
 		Title         json.RawMessage `json:"title"`
-		Code          string          `json:"code"`
+		Code          json.RawMessage `json:"code"`
 		Documentation json.RawMessage `json:"documentation"`
 	}
-	if json.Unmarshal(data, &body) != nil || body.Code == "" || len(body.Code) > 64 ||
-		strings.IndexFunc(body.Code, func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.')
-		}) >= 0 {
-		return problem
+	if json.Unmarshal(data, &body) != nil {
+		return problem, nil
 	}
-	if !slices.ContainsFunc(code.Value.Enum, func(value any) bool { allowed, ok := value.(string); return ok && allowed == body.Code }) {
-		return problem
-	}
-	problem.Code = body.Code
-	if documentation := properties["documentation"]; documentation != nil && documentation.Value != nil && documentation.Value.Format == "uri" {
-		problem.Documentation = problemDocumentation(body.Documentation)
-	}
-	if ref := properties["type"]; ref != nil && ref.Value != nil && ref.Value.Type.Is("string") {
-		if _, value := problemURI(body.Type); value != "" {
-			problem.Type = value
+	if media.Schema != nil && media.Schema.Value != nil {
+		schema := media.Schema.Value
+		problem.Code = declaredProblemCode(schema.Properties["code"], body.Code)
+		if catalog, ok := schema.Extensions["x-cli-problem-catalog"].(map[string]any); ok {
+			// A configured catalog defines the public diagnostics for this schema.
+			// The response body selects a declared code only.
+			if titles, ok := catalog["titles"].(map[string]any); ok && problem.Code != "" {
+				if title, ok := titles[problem.Code].(string); ok {
+					if prefix, ok := catalog["type-prefix"].(string); ok {
+						problem.Type = prefix + problem.Code
+					}
+					problem.Title = title
+					if base, ok := catalog["documentation-base"].(string); ok {
+						problem.Documentation = base + "#" + problem.Code
+					}
+				}
+			}
+			return problem, nil
+		}
+		if ref := schema.Properties["documentation"]; !privateInput && ref != nil && ref.Value != nil && ref.Value.Format == "uri" {
+			problem.Documentation = problemDocumentation(body.Documentation)
 		}
 	}
-	if ref := properties["title"]; problem.Type != "about:blank" && ref != nil && ref.Value != nil && ref.Value.Type.Is("string") {
+	if privateInput {
+		return problem, nil
+	}
+	if u, value := problemURI(body.Type); u != nil {
+		if u.IsAbs() {
+			problem.Type = value
+		} else if response.Request != nil {
+			// Resolve a relative problem identifier against the retrieval URI.
+			base := *response.Request.URL
+			base.RawQuery, base.ForceQuery = "", false
+			problem.Type = base.ResolveReference(u).String()
+		}
+	}
+	if problem.Type != "about:blank" {
 		var title string
 		if json.Unmarshal(body.Title, &title) == nil && title != "" && len(title) <= 160 && strings.IndexFunc(title, func(r rune) bool { return !unicode.IsPrint(r) }) < 0 {
 			problem.Title = title
 		}
 	}
-	return problem
+	return problem, nil
+}
+
+func declaredProblemCode(ref *openapi3.SchemaRef, raw json.RawMessage) string {
+	var code string
+	if ref == nil || ref.Value == nil || json.Unmarshal(raw, &code) != nil || code == "" || len(code) > 64 ||
+		strings.IndexFunc(code, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.')
+		}) >= 0 {
+		return ""
+	}
+	if slices.ContainsFunc(ref.Value.Enum, func(value any) bool { allowed, ok := value.(string); return ok && allowed == code }) {
+		return code
+	}
+	return ""
 }
 
 // A problem link is printed for the user to inspect. Reject terminal controls
 // and URL fields commonly used for credentials before rendering it.
 func problemDocumentation(raw json.RawMessage) string {
 	u, value := problemURI(raw)
-	if u == nil || u.Scheme != "https" || u.Hostname() == "" {
+	if u == nil || u.Scheme != "https" || u.Hostname() == "" || u.RawQuery != "" || u.ForceQuery {
 		return ""
 	}
 	return value
@@ -575,12 +625,12 @@ func problemDocumentation(raw json.RawMessage) string {
 
 func problemURI(raw json.RawMessage) (*url.URL, string) {
 	var value string
-	if json.Unmarshal(raw, &value) != nil || len(value) > 2048 ||
+	if json.Unmarshal(raw, &value) != nil || value == "" || len(value) > 2048 ||
 		strings.IndexFunc(value, func(r rune) bool { return r < '!' || r > '~' }) >= 0 {
 		return nil, ""
 	}
 	u, err := url.Parse(value)
-	if err != nil || !u.IsAbs() || u.User != nil || u.RawQuery != "" || u.ForceQuery {
+	if err != nil || u.User != nil {
 		return nil, ""
 	}
 	return u, value

@@ -82,28 +82,28 @@ func newTransport(caFile, certFile, keyFile string) (*http.Transport, error) {
 	return transport, nil
 }
 
-func authenticate(req *http.Request, spec *openapi3.T, op *openapi3.Operation, prefix string, mappings []string, clientCert bool) error {
+func authenticate(req *http.Request, spec *openapi3.T, op *openapi3.Operation, prefix string, mappings []string, clientCert bool) (bool, error) {
 	requirements := spec.Security
 	if op.Security != nil {
 		requirements = *op.Security
 	}
 	if len(requirements) == 0 {
-		return nil
+		return false, nil
 	}
 	overrides := map[string]string{}
 	for _, mapping := range mappings {
 		name, variable, ok := strings.Cut(mapping, "=")
 		if !ok || name == "" || variable == "" {
-			return errors.New("--auth-env expects securityScheme=ENVIRONMENT_VARIABLE")
+			return false, errors.New("--auth-env expects securityScheme=ENVIRONMENT_VARIABLE")
 		}
 		if spec.Components == nil || spec.Components.SecuritySchemes[name] == nil {
-			return errors.New("--auth-env names an unknown security scheme")
+			return false, errors.New("--auth-env names an unknown security scheme")
 		}
 		overrides[name] = variable
 	}
 	for _, requirement := range requirements {
 		if len(requirement) == 0 {
-			return nil
+			return false, nil
 		}
 		names := make([]string, 0, len(requirement))
 		for name := range requirement {
@@ -118,7 +118,7 @@ func authenticate(req *http.Request, spec *openapi3.T, op *openapi3.Operation, p
 		for _, name := range names {
 			ref := spec.Components.SecuritySchemes[name]
 			if ref == nil || ref.Value == nil {
-				return errors.New("contract references an unknown security scheme")
+				return false, errors.New("contract references an unknown security scheme")
 			}
 			scheme := ref.Value
 			variable := prefix + "_" + envName(name)
@@ -141,7 +141,7 @@ func authenticate(req *http.Request, spec *openapi3.T, op *openapi3.Operation, p
 				break
 			}
 			if strings.ContainsAny(credential, "\r\n\x00") {
-				return errors.New("credential contains an invalid control character")
+				return false, errors.New("credential contains an invalid control character")
 			}
 			switch {
 			case bearer:
@@ -149,7 +149,7 @@ func authenticate(req *http.Request, spec *openapi3.T, op *openapi3.Operation, p
 			case scheme.Type == "http" && strings.EqualFold(scheme.Scheme, "basic"):
 				user, password, ok := strings.Cut(credential, ":")
 				if !ok {
-					return fmt.Errorf("%s must contain username:password", variable)
+					return false, fmt.Errorf("%s must contain username:password", variable)
 				}
 				candidate.SetBasicAuth(user, password)
 			case scheme.Type == "apiKey":
@@ -163,22 +163,22 @@ func authenticate(req *http.Request, spec *openapi3.T, op *openapi3.Operation, p
 				case "cookie":
 					for _, r := range credential {
 						if r < 0x21 || r > 0x7e || r == '"' || r == ',' || r == ';' || r == '\\' {
-							return errors.New("API-key cookie credential contains an invalid cookie character")
+							return false, errors.New("API-key cookie credential contains an invalid cookie character")
 						}
 					}
 					candidate.AddCookie(&http.Cookie{Name: scheme.Name, Value: credential})
 				default:
-					return errors.New("unsupported API-key location")
+					return false, errors.New("unsupported API-key location")
 				}
 			default:
-				return fmt.Errorf("unsupported security scheme %s", name)
+				return false, fmt.Errorf("unsupported security scheme %s", name)
 			}
 		}
 		if available {
 			req.Header = candidate.Header
 			req.URL = candidate.URL
-			return nil
+			return true, nil
 		}
 	}
-	return fmt.Errorf("authentication required: set %s_TOKEN for bearer auth or use --auth-env scheme=ENV", prefix)
+	return false, fmt.Errorf("authentication required: set %s_TOKEN for bearer auth or use --auth-env scheme=ENV", prefix)
 }

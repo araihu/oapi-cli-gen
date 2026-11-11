@@ -181,21 +181,25 @@ commas, quotes and newlines. Empty collections produce no table or CSV output.
 
 `--output json` pretty-prints the complete JSON response. `--output raw` streams
 raw bytes. Successful `text/event-stream` responses stream as raw bytes by
-default. An explicit `--output` overrides the default.
+default when the operation declares that media type. Use `--output raw` to
+read bytes from an undeclared stream explicitly.
 `--response-header ETag` prints one header instead of any body format.
 Empty responses and conditional HTTP 304 responses succeed without body output.
-Response data can contain secrets: stdout is intended for the caller's chosen
-destination. For an `application/problem+json` response, the CLI can append a
-short `code` from the response schema’s declared enum, for example
-`HTTP 409 Conflict (state_conflict)`. If the schema declares a
-`documentation` URI and the response supplies a printable HTTPS URL without
-userinfo or a query string, the CLI prints it on the next stderr line. The
-CLI does not open the link or print the rest of the error body.
+For an `application/problem+json` response, the CLI can append a short `code`
+from the response schema's declared enum, for example
+`HTTP 409 Conflict (state_conflict)`. With `--output json`, HTTP failures emit
+one Problem Details object on stderr and leave stdout empty. The HTTP status
+comes from the response. Standard type URIs, including relative references,
+are processed independently of `code`.
 
-With `--output json`, HTTP failures emit one Problem Details object on stderr
-and leave stdout empty. The diagnostic includes the HTTP status and validated
-problem metadata. For an unrecognized response, it uses `about:blank` and
-the HTTP status title. HTTP failures still exit with code 4.
+For requests with input or authentication, server-supplied problem metadata
+is restricted to the declared short code. A schema's optional
+`x-cli-problem-catalog` can provide trusted metadata for both output modes.
+Set `type-prefix`, `documentation-base`, and `titles` keyed by declared code.
+The CLI appends the code to the type prefix and uses it as the fragment of the
+documentation URL. For public requests without input, a declared
+`documentation` URI can supply a printable HTTPS link. Unrecognized
+responses use `about:blank` and the HTTP status title.
 
 JSON mode writes usage and transport failures as Problem Details on stderr.
 The `type` is `urn:cli:<name>:problem:<code>` and uses the generated CLI name.
@@ -210,7 +214,7 @@ The generated CLI emits the link as `documentation` when configured.
 | --- | --- |
 | 0 | Successful HTTP result, including 304; or help/completion |
 | 2 | Invalid flags/input/schema, missing credentials, or configuration |
-| 3 | Transport/TLS/timeout/cancellation or response read/format/size failure |
+| 3 | Transport/TLS/timeout/cancellation or response read/format/size failure, or requested header absent |
 | 4 | Unsuccessful HTTP status, including an unfollowed redirect |
 
 Raw output may be partial if streaming fails or the response exceeds its bound;

@@ -280,7 +280,7 @@ func TestAuthenticationAlternativesAndAND(t *testing.T) {
 	spec.Components.SecuritySchemes["basic"] = &openapi3.SecuritySchemeRef{Value: &openapi3.SecurityScheme{Type: "http", Scheme: "basic"}}
 	spec.Security = openapi3.SecurityRequirements{{"apiKey": {}, "bearerAuth": {}}}
 	req, _ := http.NewRequest("GET", "https://example.invalid", nil)
-	if err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", []string{"apiKey=SERVICE_KEY"}, false); err != nil {
+	if applied, err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", []string{"apiKey=SERVICE_KEY"}, false); err != nil || !applied {
 		t.Fatal(err)
 	}
 	if req.Header.Get("Authorization") != "Bearer bearer" || req.Header.Get("X-API-Key") != "api-key" {
@@ -288,7 +288,7 @@ func TestAuthenticationAlternativesAndAND(t *testing.T) {
 	}
 	spec.Security = openapi3.SecurityRequirements{{"basic": {}}}
 	req.Header = http.Header{}
-	if err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", []string{"basic=SERVICE_BASIC"}, false); err != nil {
+	if applied, err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", []string{"basic=SERVICE_BASIC"}, false); err != nil || !applied {
 		t.Fatal(err)
 	}
 	user, password, ok := req.BasicAuth()
@@ -297,7 +297,7 @@ func TestAuthenticationAlternativesAndAND(t *testing.T) {
 	}
 	spec.Security = openapi3.SecurityRequirements{{"apiKey": {}}, {"bearerAuth": {}}}
 	req.Header = http.Header{}
-	if err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", nil, false); err != nil || req.Header.Get("Authorization") != "Bearer bearer" {
+	if applied, err := authenticate(req, spec, spec.Paths.Value("/items/{id}").Get, "DEMO", nil, false); err != nil || !applied || req.Header.Get("Authorization") != "Bearer bearer" {
 		t.Fatal("OR fallback failed")
 	}
 	if req.Header.Get("X-API-Key") != "" {
@@ -371,16 +371,24 @@ func TestEventStreamDefaultsToRaw(t *testing.T) {
 	}))
 	defer server.Close()
 
-	out, _, err := runCommand(t, document(t), server.URL, "", "public")
+	doc := document(t)
+	out, _, err := runCommand(t, doc, server.URL, "", "public")
+	if err == nil || ExitCode(err) != 3 || out != "" {
+		t.Fatalf("undeclared stream output = %q, err = %v", out, err)
+	}
+	doc.Paths.Find("/public").Get.Responses.Status(200).Value.Content = openapi3.Content{
+		"text/event-stream": {},
+	}
+	out, _, err = runCommand(t, doc, server.URL, "", "public")
 	if err != nil || out != frame {
 		t.Fatalf("default output = %q, err = %v", out, err)
 	}
-	out, _, err = runCommand(t, document(t), server.URL, "", "public", "--output", "table")
+	out, _, err = runCommand(t, doc, server.URL, "", "public", "--output", "table")
 	if err == nil || ExitCode(err) != 3 || out != "" {
 		t.Fatalf("explicit table output = %q, err = %v", out, err)
 	}
 	hold.Store(true)
-	out, _, err = runCommand(t, document(t), server.URL, "", "public", "--timeout", "1s")
+	out, _, err = runCommand(t, doc, server.URL, "", "public", "--timeout", "1s")
 	if err == nil || ExitCode(err) != 3 || err.Error() != "request timed out" || out != frame {
 		t.Fatalf("open stream output = %q, err = %v", out, err)
 	}
@@ -411,7 +419,7 @@ func TestHTTPProblemDisplaysOnlyDeclaredDiagnosticFields(t *testing.T) {
 		{"link control character", problemJSON, `{"code":"state_conflict","documentation":"https://docs.example.com/problems#\u001b[0m"}`, " (state_conflict)", nil},
 		{"idempotency conflict", problemJSON, `{"code":"idempotency_conflict"}`, " (idempotency_conflict)", nil},
 		{"other media", "application/json", `{"code":"state_conflict"}`, "", nil},
-		{"undeclared code", problemJSON, `{"code":"secret","documentation":"https://docs.example.com/problems"}`, "", nil},
+		{"undeclared code", problemJSON, `{"code":"secret"}`, "", nil},
 		{"control character", problemJSON, `{"code":"unsafe\ncode"}`, "", nil},
 		{"malformed body", problemJSON, `{"code":"state_conflict"`, "", nil},
 		{"oversize body", problemJSON, `{"code":"state_conflict"}`, "", []string{"--max-output-bytes", "8"}},
@@ -472,6 +480,8 @@ func TestHTTPFailureJSON(t *testing.T) {
 			`{"type":"urn:example:state-conflict","title":"State conflict","status":400,"code":"state_conflict","documentation":"https://docs.example.com/state","detail":"private","currentMessage":{"text":"private"}}`,
 			"urn:example:state-conflict", "State conflict", "state_conflict", "https://docs.example.com/state",
 		},
+		{"standard problem", problemJSON, `{"type":"urn:example:standard","title":"Standard problem"}`, "urn:example:standard", "Standard problem", "", ""},
+		{"relative type", problemJSON, `{"type":"/problems/conflict","title":"Relative problem"}`, "/problems/conflict", "Relative problem", "", ""},
 		{"HTML response", "text/html", "<p>private</p>", "about:blank", "Conflict", "", ""},
 		{"invalid JSON", problemJSON, "{", "about:blank", "Conflict", "", ""},
 		{"undeclared code", problemJSON, `{"code":"private","title":"private"}`, "about:blank", "Conflict", "", ""},
@@ -485,6 +495,11 @@ func TestHTTPFailureJSON(t *testing.T) {
 			}))
 			defer server.Close()
 
+			if tc.name == "standard problem" {
+				code := schema.Properties["code"]
+				delete(schema.Properties, "code")
+				defer func() { schema.Properties["code"] = code }()
+			}
 			out, _, err := runCommand(t, doc, server.URL, "", "public", "--output", "json")
 			if out != "" || err == nil || ExitCode(err) != 4 {
 				t.Fatalf("stdout = %q, err = %v", out, err)
@@ -494,9 +509,101 @@ func TestHTTPFailureJSON(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := httpProblem{Type: tc.problemType, Title: tc.title, Status: 409, Code: tc.code, Documentation: tc.documentation}
+			if strings.HasPrefix(want.Type, "/") {
+				want.Type = server.URL + want.Type
+			}
 			if got != want || strings.Contains(err.Error(), "private") {
 				t.Fatalf("diagnostic = %s, want %+v", err, want)
 			}
 		})
+	}
+}
+
+func TestHTTPProblemCatalogKeepsRequestDataOutOfDiagnostics(t *testing.T) {
+	t.Setenv("DEMO_TOKEN", "fixture-private-token")
+	doc := document(t)
+	op := doc.Paths.Find("/items").Post
+	schema := openapi3.NewObjectSchema().WithProperty("code", openapi3.NewStringSchema().WithEnum("state_conflict"))
+	link := openapi3.NewStringSchema()
+	link.Format = "uri"
+	schema.WithProperty("documentation", link)
+	op.Responses.Set("409", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Conflict").WithContent(
+		openapi3.Content{"application/problem+json": {Schema: &openapi3.SchemaRef{Value: schema}}},
+	)})
+	const marker = "fixture-private-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+marker {
+			t.Error("fixture did not receive the credential")
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(w, `{"type":"urn:example:%s","title":"%s","code":"state_conflict","documentation":"https://docs.example.com/%s"}`, marker, marker, marker)
+	}))
+	defer server.Close()
+	for _, catalog := range []bool{false, true} {
+		if catalog {
+			schema.Extensions = map[string]any{"x-cli-problem-catalog": map[string]any{
+				"type-prefix": "urn:example:problem:", "documentation-base": "https://docs.example.com/catalog",
+				"titles": map[string]any{"state_conflict": "State conflict"},
+			}}
+		}
+		for _, format := range []string{"table", "json"} {
+			out, _, err := runCommand(t, doc, server.URL, `{"name":"fixture-private-token"}`, "items", "create", "--body-stdin", "--output", format)
+			if err == nil || ExitCode(err) != 4 || out != "" || strings.Contains(err.Error(), marker) ||
+				strings.Contains(err.Error(), "https://docs.example.com/catalog#state_conflict") != catalog {
+				t.Fatalf("catalog=%t format=%s stdout=%q err=%v", catalog, format, out, err)
+			}
+		}
+	}
+}
+
+func TestHTTPProblemBodyDeadlineIsTransportFailure(t *testing.T) {
+	doc := document(t)
+	doc.Paths.Find("/public").Get.Responses.Set("503", &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("Unavailable").WithContent(
+		openapi3.Content{"application/problem+json": {}},
+	)})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	out, _, err := runCommand(t, doc, server.URL, "", "public", "--output", "json", "--timeout", "250ms")
+	if err == nil || ExitCode(err) != 3 || err.Error() != "request timed out" || out != "" {
+		t.Fatalf("stdout = %q, err = %v", out, err)
+	}
+}
+
+func TestDeprecatedOperationAndMissingHeaderKeepJSONDiagnosticsClean(t *testing.T) {
+	doc := document(t)
+	doc.Paths.Find("/public").Get.Deprecated = true
+	var failHTTP atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if failHTTP.Load() {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+	for _, tc := range []struct {
+		args     []string
+		exitCode int
+	}{
+		{[]string{"public", "--output", "json", "--unknown"}, 2},
+		{[]string{"public", "--output", "json", "--response-header", "ETag"}, 3},
+		{[]string{"public", "--output", "json"}, 4},
+	} {
+		failHTTP.Store(tc.exitCode == 4)
+		out, stderr, err := runCommand(t, doc, server.URL, "", tc.args...)
+		if err == nil || ExitCode(err) != tc.exitCode || out != "" || stderr != "" {
+			t.Fatalf("args=%v stdout=%q stderr=%q err=%v", tc.args, out, stderr, err)
+		}
+	}
+	failHTTP.Store(false)
+	out, stderr, err := runCommand(t, doc, server.URL, "", "public")
+	if err != nil || !strings.Contains(stderr, "deprecated") || out == "" {
+		t.Fatalf("text invocation stdout=%q stderr=%q err=%v", out, stderr, err)
 	}
 }
