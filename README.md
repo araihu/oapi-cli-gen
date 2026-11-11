@@ -192,9 +192,12 @@ and leave stdout empty. The diagnostic includes the HTTP status and validated
 problem metadata. For an unrecognized response, it uses `about:blank` and
 the HTTP status title. HTTP failures still exit with code 4.
 
-JSON mode also writes usage and transport diagnostics to stderr with
-`code`, `message` and `exitCode`. The codes are `usage_error` for exit 2
-and `transport_error` for exit 3, including timeouts and cancellation.
+JSON mode writes usage and transport failures as Problem Details on stderr.
+The `type` is `urn:cli:<name>:problem:<code>` and uses the generated CLI name.
+The object includes `title`, `detail`, `code`, and `exitCode`, and omits
+HTTP `status`. The codes are `usage_error` (Invalid command usage, exit 2)
+and `transport_error` (Transport error, exit 3), including timeouts and
+cancellation.
 
 | Exit code | Meaning |
 | --- | --- |

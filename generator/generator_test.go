@@ -167,13 +167,17 @@ func TestGeneratedClientRunsSDKSerialization(t *testing.T) {
 			out, stderr, err := run("", tc.args...)
 			var exit *exec.ExitError
 			var got struct {
-				Code     string `json:"code"`
-				Message  string `json:"message"`
-				ExitCode int    `json:"exitCode"`
+				Type     string          `json:"type"`
+				Title    string          `json:"title"`
+				Detail   string          `json:"detail"`
+				Code     string          `json:"code"`
+				ExitCode int             `json:"exitCode"`
+				Status   json.RawMessage `json:"status"`
 			}
 			if !errors.As(err, &exit) || exit.ExitCode() != tc.exitCode || out != "" ||
 				json.Unmarshal([]byte(stderr), &got) != nil || got.Code != tc.code ||
-				got.ExitCode != tc.exitCode || got.Message == "" {
+				got.Type != "urn:cli:pets:problem:"+tc.code || got.Title == "" ||
+				got.Detail == "" || got.ExitCode != tc.exitCode || got.Status != nil {
 				t.Fatalf("exit=%v stdout=%q stderr=%q", err, out, stderr)
 			}
 		})

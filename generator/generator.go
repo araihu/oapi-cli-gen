@@ -157,9 +157,9 @@ func main() {
  defer cancel()
  root, err := cli.New()
  if err == nil { err = root.ExecuteContext(ctx) }
- if err != nil { fmt.Fprintln(os.Stderr, cliruntime.Diagnostic(root, os.Args[1:], err)); os.Exit(cliruntime.ExitCode(err)) }
+ if err != nil { fmt.Fprintln(os.Stderr, cliruntime.Diagnostic(%q, root, os.Args[1:], err)); os.Exit(cliruntime.ExitCode(err)) }
 }
-`, options.Module+"/internal/cli", options.Module+"/internal/cliruntime")
+`, options.Module+"/internal/cli", options.Module+"/internal/cliruntime", options.Name)
 	files["cmd/"+options.Name+"/main.go"] = []byte(mainSource)
 	for name, data := range files {
 		formatted, err := format.Source(data)
