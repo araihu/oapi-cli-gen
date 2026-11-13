@@ -285,3 +285,8 @@ interactive OAuth login, stored profiles, automatic pagination/retries, and
 field-by-field body editors are not implemented. The CLI sends to one configured
 base URL per invocation. Non-JSON bodies are sent as provided; schema body
 validation currently covers JSON media types. There is no UI or TUI.
+
+## License
+
+[MIT](LICENSE). The generator copies its CLI runtime and templates into
+consuming projects. The copied portions are also available under MIT.
